@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -319,20 +320,23 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		s.ChannelMessageSend(m.ChannelID, "-# Restarting pigeon-claw...")
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			exe, err := os.Executable()
-			if err != nil {
-				slog.Error("cannot find binary for restart", "error", err)
-				return
-			}
+
 			// Release PID lock before exit (os.Exit skips defers)
 			home, _ := os.UserHomeDir()
 			os.Remove(filepath.Join(home, ".pigeon-claw", "pigeon-claw.pid"))
 
-			cmd := exec.Command(exe, "serve")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Start()
-			os.Exit(0)
+			// Find the actual binary (resolve symlinks for brew)
+			exe, err := exec.LookPath("pigeon-claw")
+			if err != nil {
+				exe, err = os.Executable()
+			}
+			if err != nil {
+				slog.Error("cannot find binary for restart", "error", err)
+				return
+			}
+
+			// Replace current process with new binary
+			syscall.Exec(exe, []string{exe, "serve"}, os.Environ())
 		}()
 		return true
 
@@ -624,14 +628,11 @@ func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		},
 	}
 
-	// Defer the response first (Discord requires response within 3 seconds)
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
-
-	// Run the command
+	// Run the command (sends response via ChannelMessageSend)
 	h.handleBuiltinCommand(s, fake)
 
-	// Delete the deferred "thinking..." message
-	s.InteractionResponseDelete(i.Interaction)
+	// Acknowledge the interaction silently to prevent "interaction failed"
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	})
 }

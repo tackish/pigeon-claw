@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -122,18 +123,16 @@ func runBrewUpdate() {
 	fmt.Println("  ✓ Updated! Restarting...")
 	fmt.Println()
 
-	// Re-exec the new binary
-	exe, err := os.Executable()
+	// Release PID lock before re-exec
+	home, _ := os.UserHomeDir()
+	os.Remove(home + "/.pigeon-claw/pigeon-claw.pid")
+
+	// Find the new binary (resolve brew symlinks)
+	exe, err := exec.LookPath("pigeon-claw")
 	if err != nil {
-		fmt.Printf("  ✗ Cannot find binary: %s\n", err)
-		fmt.Println("  Please restart manually: pigeon-claw serve")
-		return
+		exe, _ = os.Executable()
 	}
-	execErr := exec.Command(exe, "serve").Start()
-	if execErr != nil {
-		fmt.Printf("  ✗ Restart failed: %s\n", execErr)
-		fmt.Println("  Please restart manually: pigeon-claw serve")
-		return
-	}
-	os.Exit(0)
+
+	// Replace current process with new binary
+	syscall.Exec(exe, []string{exe, "serve"}, os.Environ())
 }
