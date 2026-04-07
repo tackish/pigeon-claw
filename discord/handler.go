@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +43,7 @@ type Handler struct {
 	router          *router.Router
 	channelLocks    sync.Map // map[channelID]*sync.Mutex
 	retryMessages   sync.Map // map[messageID]*retryInfo
+	activeRequests  sync.Map // map[channelID]string — content being processed
 	mu              sync.RWMutex
 	allowedChannels map[string]bool
 	mentionChannels map[string]bool
@@ -137,10 +140,22 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	case <-acquired:
 		// Got the lock
 	case <-time.After(concurrencyTimeout):
-		s.ChannelMessageSend(m.ChannelID, h.msgs.RequestInProgress)
+		active, _ := h.activeRequests.Load(m.ChannelID)
+		preview := "..."
+		if s, ok := active.(string); ok && s != "" {
+			preview = s
+			if len(preview) > 80 {
+				preview = preview[:80] + "..."
+			}
+		}
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# %s", fmt.Sprintf(h.msgs.RequestInProgress, preview)))
 		return
 	}
 	defer lock.Unlock()
+
+	// Track what's being processed for concurrency messages
+	h.activeRequests.Store(m.ChannelID, m.Content)
+	defer h.activeRequests.Delete(m.ChannelID)
 
 	// React to indicate processing
 	if err := s.MessageReactionAdd(m.ChannelID, m.ID, "👀"); err != nil {
@@ -291,6 +306,26 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 	case content == "!reset":
 		h.router.GetSessions().Reset(m.ChannelID)
 		s.ChannelMessageSend(m.ChannelID, h.msgs.SessionReset)
+		return true
+
+	case content == "!restart":
+		s.ChannelMessageSend(m.ChannelID, "-# Restarting pigeon-claw...")
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			exe, err := os.Executable()
+			if err != nil {
+				slog.Error("cannot find binary for restart", "error", err)
+				return
+			}
+			// Start new process then exit current one.
+			// If running under launchd with KeepAlive, launchd handles it.
+			// If running foreground, the new process takes over.
+			cmd := exec.Command(exe, "serve")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Start()
+			os.Exit(0)
+		}()
 		return true
 
 	case content == "!status":

@@ -49,7 +49,7 @@ func checkUpdate() {
 		fmt.Println()
 
 		// Ask user with 10-second timeout (auto-skip for daemon mode)
-		answer := promptWithTimeout("  Update now? [Y/n] (auto-skip in 10s): ", 10*time.Second)
+		answer := promptWithTimeout("  Update now? [Y/n] (auto-update in 10s): ", 10*time.Second)
 
 		switch strings.ToLower(strings.TrimSpace(answer)) {
 		case "", "y", "yes":
@@ -76,8 +76,8 @@ func promptWithTimeout(prompt string, timeout time.Duration) string {
 		return answer
 	case <-time.After(timeout):
 		fmt.Println()
-		fmt.Println("  No response, continuing...")
-		return "n"
+		fmt.Println("  No response, auto-updating...")
+		return "y"
 	}
 }
 
