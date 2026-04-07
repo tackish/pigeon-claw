@@ -35,18 +35,53 @@ func runDaemon(action string) {
 }
 
 func daemonStart(plistPath string) {
-	// Check if plist exists
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
-		// Try to copy from project directory
-		srcPlist := "com.pigeon-claw.plist"
-		if _, err := os.Stat(srcPlist); err == nil {
-			exec.Command("cp", srcPlist, plistPath).Run()
-			fmt.Printf("Installed plist to %s\n", plistPath)
-		} else {
-			fmt.Fprintf(os.Stderr, "plist not found at %s\n", plistPath)
-			fmt.Fprintf(os.Stderr, "Run from project directory or copy plist manually.\n")
+		// Auto-generate plist
+		binaryPath, _ := os.Executable()
+		if binaryPath == "" {
+			binaryPath, _ = exec.LookPath("pigeon-claw")
+		}
+		if binaryPath == "" {
+			fmt.Fprintf(os.Stderr, "cannot find pigeon-claw binary path\n")
 			os.Exit(1)
 		}
+
+		home, _ := os.UserHomeDir()
+		plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>%s</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>%s</string>
+        <string>serve</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>%s/.pigeon-claw/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>%s/.pigeon-claw/stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>%s</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:%s/.local/bin</string>
+    </dict>
+</dict>
+</plist>`, plistName, binaryPath, home, home, home, home)
+
+		os.MkdirAll(filepath.Dir(plistPath), 0755)
+		if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create plist: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Created %s\n", plistPath)
 	}
 
 	out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput()

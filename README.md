@@ -15,7 +15,7 @@
   <a href="#providers">Providers</a> •
   <a href="#discord-commands">Commands</a> •
   <a href="#configuration">Config</a> •
-  <a href="#한국어">한국어</a>
+  <a href="#korean">한국어</a>
 </p>
 
 ---
@@ -81,7 +81,7 @@ pigeon-claw (same request):
 ### Homebrew (recommended)
 
 ```bash
-brew tap tackish/pigeon-claw
+brew tap tackish/pigeon-claw https://github.com/tackish/pigeon-claw
 brew install pigeon-claw
 ```
 
@@ -387,19 +387,19 @@ flowchart LR
         CH3[Channel C]
     end
 
-    subgraph pigeon-claw
+    subgraph pc [pigeon-claw]
         H[Handler]
         R[Router]
         SS[Session Store]
     end
 
-    subgraph ~/.pigeon-claw/sessions/
+    subgraph disk [Sessions Disk]
         F1[channel_A.json]
         F2[channel_B.json]
         F3[channel_C.json]
     end
 
-    subgraph Providers
+    subgraph prov [Providers]
         P1[claude-cli]
         P2[ollama]
     end
@@ -420,17 +420,17 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    MSG[User Message] --> P1{Provider 1\nclaude-cli}
-    P1 -->|Success| DONE[✅ Respond]
-    P1 -->|Error/Timeout| EXPORT[Export context\nto English markdown]
-    EXPORT --> P2{Provider 2\nollama}
-    P2 -->|Success| DONE2[⚡ Respond\nfallback emoji]
-    P2 -->|Error| FAIL[❌ All failed]
+    MSG[User Message] --> P1{Provider 1}
+    P1 -->|Success| DONE[Respond]
+    P1 -->|Error/Timeout| EXPORT[Export context to markdown]
+    EXPORT --> P2{Provider 2 fallback}
+    P2 -->|Success| DONE2[Respond with fallback]
+    P2 -->|Error| FAIL[All providers failed]
 ```
 
 ---
 
-## 한국어
+## Korean
 
 pigeon-claw는 Discord 기반 원격 Mac 에이전트입니다. openclaw의 무거운 토큰 사용을 해결하기 위한 경량 프록시로, Discord 채널에서 대화하면 LLM이 Mac을 자율 제어합니다.
 
