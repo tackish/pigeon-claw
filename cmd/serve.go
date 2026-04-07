@@ -16,6 +16,7 @@ func runServe() {
 	}
 
 	setupLogger(cfg.LogLevel)
+	checkUpdate()
 	slog.Info("starting pigeon-claw",
 		"allowed_channels", cfg.AllowedChannels,
 		"mention_channels", cfg.MentionChannels,
