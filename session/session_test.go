@@ -128,6 +128,89 @@ func TestActiveProvider(t *testing.T) {
 	}
 }
 
+func TestCLISessionIDPersistence(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(50, dir)
+
+	sess := store.GetOrCreate("ch_cli")
+
+	// Initially empty
+	if id := sess.GetCLISessionID(); id != "" {
+		t.Fatalf("expected empty CLI session ID, got '%s'", id)
+	}
+
+	// Set and verify
+	sess.SetCLISessionID("test-uuid-1234")
+	if id := sess.GetCLISessionID(); id != "test-uuid-1234" {
+		t.Fatalf("expected 'test-uuid-1234', got '%s'", id)
+	}
+
+	// Restore from disk
+	store2 := NewStore(50, dir)
+	sess2 := store2.GetOrCreate("ch_cli")
+	if id := sess2.GetCLISessionID(); id != "test-uuid-1234" {
+		t.Fatalf("CLI session ID not restored from JSON, got '%s'", id)
+	}
+
+	// Reset should clear it
+	store2.Reset("ch_cli")
+	sess3 := store2.GetOrCreate("ch_cli")
+	if id := sess3.GetCLISessionID(); id != "" {
+		t.Fatalf("expected empty after reset, got '%s'", id)
+	}
+}
+
+// Simulates pigeon-claw crash → restart → session restored from JSON
+func TestRestartResumesSession(t *testing.T) {
+	dir := t.TempDir()
+
+	// === Phase 1: Bot running, conversation happens ===
+	store1 := NewStore(50, dir)
+	sess1 := store1.GetOrCreate("ch_restart")
+	sess1.SetActiveProvider("claude-cli")
+	sess1.SetCLISessionID("abc-123-uuid")
+	sess1.Append(provider.Message{Role: provider.RoleUser, Content: "hello"})
+	sess1.Append(provider.Message{Role: provider.RoleAssistant, Content: "hi there"})
+	sess1.Append(provider.Message{Role: provider.RoleUser, Content: "do something"})
+
+	// === Phase 2: Bot crashes (store1 goes away) ===
+	store1 = nil
+
+	// === Phase 3: Bot restarts, loads from disk ===
+	store2 := NewStore(50, dir)
+	sess2 := store2.GetOrCreate("ch_restart")
+
+	// Verify everything is restored
+	if sess2.GetCLISessionID() != "abc-123-uuid" {
+		t.Fatalf("CLI session ID not restored, got '%s'", sess2.GetCLISessionID())
+	}
+	if sess2.GetActiveProvider() != "claude-cli" {
+		t.Fatalf("active provider not restored, got '%s'", sess2.GetActiveProvider())
+	}
+	if sess2.MessageCount() != 3 {
+		t.Fatalf("expected 3 messages, got %d", sess2.MessageCount())
+	}
+
+	// Verify resume logic: CLISessionID is not empty → resume=true
+	resume := sess2.GetCLISessionID() != ""
+	if !resume {
+		t.Fatal("should resume existing session after restart")
+	}
+
+	// Simulate new message after restart
+	sess2.Append(provider.Message{Role: provider.RoleUser, Content: "continue after restart"})
+	history := sess2.History()
+	lastMsg := history[len(history)-1]
+	if lastMsg.Content != "continue after restart" {
+		t.Fatalf("expected last message to be new one, got '%s'", lastMsg.Content)
+	}
+
+	// CLI session ID should still be the same
+	if sess2.GetCLISessionID() != "abc-123-uuid" {
+		t.Fatalf("CLI session ID changed after append, got '%s'", sess2.GetCLISessionID())
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(100, dir)

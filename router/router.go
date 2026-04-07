@@ -314,8 +314,18 @@ func (r *Router) trySessionAwareProvider(
 	defer cancel()
 
 	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, toolDefs, sessionID, resume, onStatus)
+	if err != nil && resume {
+		// Resume failed — session may have expired on CLI side.
+		// Retry as a fresh session before giving up.
+		slog.Warn("resume failed, retrying as new session", "error", err)
+		sessionID = generateSessionID()
+		sess.SetCLISessionID(sessionID)
+
+		ctx2, cancel2 := context.WithTimeout(context.Background(), r.timeout)
+		defer cancel2()
+		resp, err = sa.SendWithSession(ctx2, systemPrompt, lastMsg.Content, toolDefs, sessionID, false, onStatus)
+	}
 	if err != nil {
-		// Session might be corrupted; reset and let caller retry with fallback
 		sess.SetCLISessionID("")
 		return nil, fmt.Errorf("session-aware send failed: %w", err)
 	}
