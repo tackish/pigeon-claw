@@ -312,6 +312,10 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 	content := strings.TrimSpace(m.Content)
 
 	switch {
+	case content == "!help":
+		s.ChannelMessageSend(m.ChannelID, h.msgs.Help)
+		return true
+
 	case content == "!reset":
 		h.router.GetSessions().Reset(m.ChannelID)
 		s.ChannelMessageSend(m.ChannelID, h.msgs.SessionReset)
@@ -579,4 +583,50 @@ func (h *Handler) OnReactionAdd(s *discordgo.Session, r *discordgo.MessageReacti
 		}
 		s.ChannelMessageSend(r.ChannelID, footer)
 	}
+}
+
+var slashCommands = []*discordgo.ApplicationCommand{
+	{Name: "help", Description: "Show available commands"},
+	{Name: "reset", Description: "Reset current channel session"},
+	{Name: "cancel", Description: "Cancel the current request"},
+	{Name: "restart", Description: "Restart the bot process"},
+	{Name: "status", Description: "Show provider and message count"},
+	{Name: "debug", Description: "Show last error and session info"},
+	{Name: "model", Description: "List all provider models"},
+	{Name: "provider", Description: "Show provider priority"},
+}
+
+func (h *Handler) RegisterSlashCommands(s *discordgo.Session) {
+	for _, cmd := range slashCommands {
+		if _, err := s.ApplicationCommandCreate(s.State.User.ID, "", cmd); err != nil {
+			slog.Warn("failed to register slash command", "command", cmd.Name, "error", err)
+		}
+	}
+	slog.Info("slash commands registered", "count", len(slashCommands))
+}
+
+func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+
+	// Create a fake MessageCreate so we can reuse handleBuiltinCommand
+	fake := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ChannelID: i.ChannelID,
+			Content:   "!" + i.ApplicationCommandData().Name,
+			Author:    &discordgo.User{ID: i.Member.User.ID},
+		},
+	}
+
+	// Defer the response first (Discord requires response within 3 seconds)
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+
+	// Run the command
+	h.handleBuiltinCommand(s, fake)
+
+	// Delete the deferred "thinking..." message
+	s.InteractionResponseDelete(i.Interaction)
 }

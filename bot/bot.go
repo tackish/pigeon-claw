@@ -46,6 +46,7 @@ func New(cfg *config.Config) (*Bot, error) {
 
 	dg.AddHandler(handler.OnMessageCreate)
 	dg.AddHandler(handler.OnReactionAdd)
+	dg.AddHandler(handler.OnInteraction)
 
 	return &Bot{
 		cfg:     cfg,
@@ -62,6 +63,9 @@ func (b *Bot) Run() error {
 	defer b.session.Close()
 
 	slog.Info("bot is running", "user", b.session.State.User.Username)
+
+	// Register slash commands
+	b.handler.RegisterSlashCommands(b.session)
 
 	// Handle SIGHUP for config reload
 	sighup := make(chan os.Signal, 1)
