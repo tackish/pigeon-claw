@@ -23,9 +23,8 @@ import (
 const (
 	maxDiscordMessage   = 2000
 	fileUploadThreshold = 10000
-	typingInterval      = 10 * time.Second
-	concurrencyTimeout  = 30 * time.Second
-	maxImageDownload    = 20 * 1024 * 1024 // 20MB
+	typingInterval   = 10 * time.Second
+	maxImageDownload = 20 * 1024 * 1024 // 20MB
 )
 
 var imageContentTypes = map[string]bool{
@@ -129,24 +128,19 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	// Per-channel concurrency control
-	lockI, _ := h.channelLocks.LoadOrStore(m.ChannelID, &sync.Mutex{})
-	lock := lockI.(*sync.Mutex)
-
-	acquired := make(chan struct{})
-	go func() {
-		lock.Lock()
-		close(acquired)
-	}()
+	// Per-channel concurrency: use a buffered channel as a non-blocking lock
+	semI, _ := h.channelLocks.LoadOrStore(m.ChannelID, make(chan struct{}, 1))
+	sem := semI.(chan struct{})
 
 	select {
-	case <-acquired:
-		// Got the lock
-	case <-time.After(concurrencyTimeout):
+	case sem <- struct{}{}:
+		// Acquired the slot
+	default:
+		// Channel is busy — show what's being processed
 		active, _ := h.activeRequests.Load(m.ChannelID)
 		preview := "..."
-		if s, ok := active.(string); ok && s != "" {
-			preview = s
+		if str, ok := active.(string); ok && str != "" {
+			preview = str
 			if len(preview) > 80 {
 				preview = preview[:80] + "..."
 			}
@@ -154,7 +148,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# %s", fmt.Sprintf(h.msgs.RequestInProgress, preview)))
 		return
 	}
-	defer lock.Unlock()
+	defer func() { <-sem }()
 
 	// Track what's being processed for concurrency messages
 	h.activeRequests.Store(m.ChannelID, m.Content)
