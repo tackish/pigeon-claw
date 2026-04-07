@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -43,7 +44,7 @@ func checkUpdate() {
 		return
 	}
 
-	if latest != current && latest > current {
+	if isNewer(latest, current) {
 		slog.Warn("new version available", "current", current, "latest", latest)
 		fmt.Printf("\n  ⬆ New version available: %s → %s\n", current, latest)
 		fmt.Println()
@@ -59,6 +60,25 @@ func checkUpdate() {
 			fmt.Println()
 		}
 	}
+}
+
+// isNewer compares semver strings (e.g., "0.0.10" > "0.0.6")
+func isNewer(latest, current string) bool {
+	parse := func(v string) [3]int {
+		var parts [3]int
+		for i, s := range strings.SplitN(v, ".", 3) {
+			parts[i], _ = strconv.Atoi(s)
+		}
+		return parts
+	}
+	l, c := parse(latest), parse(current)
+	if l[0] != c[0] {
+		return l[0] > c[0]
+	}
+	if l[1] != c[1] {
+		return l[1] > c[1]
+	}
+	return l[2] > c[2]
 }
 
 func promptWithTimeout(prompt string, timeout time.Duration) string {
