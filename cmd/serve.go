@@ -3,6 +3,7 @@ package cmd
 import (
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/tackish/pigeon-claw/bot"
 	"github.com/tackish/pigeon-claw/config"
@@ -16,6 +17,15 @@ func runServe() {
 	}
 
 	setupLogger(cfg.LogLevel)
+
+	home, _ := os.UserHomeDir()
+	lockPath := filepath.Join(home, ".pigeon-claw", "pigeon-claw.pid")
+	if err := acquireLock(lockPath); err != nil {
+		slog.Error("cannot start", "error", err)
+		os.Exit(1)
+	}
+	defer releaseLock(lockPath)
+
 	checkUpdate()
 	slog.Info("starting pigeon-claw",
 		"allowed_channels", cfg.AllowedChannels,

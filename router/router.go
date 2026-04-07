@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -285,6 +286,24 @@ func (r *Router) GetDebug(channelID string) *DebugInfo {
 	return r.debugInfo[channelID]
 }
 
+// buildContextMessage constructs a single message containing conversation
+// history from JSON, used when CLI session resume fails and we need to
+// start a fresh session without losing context.
+func buildContextMessage(history []provider.Message) string {
+	var sb strings.Builder
+	sb.WriteString("Here is the previous conversation history:\n\n")
+	for _, msg := range history {
+		switch msg.Role {
+		case provider.RoleUser:
+			sb.WriteString(fmt.Sprintf("User: %s\n", msg.Content))
+		case provider.RoleAssistant:
+			sb.WriteString(fmt.Sprintf("Assistant: %s\n", msg.Content))
+		}
+	}
+	sb.WriteString("\nContinue from the last user message above.")
+	return sb.String()
+}
+
 func (r *Router) trySessionAwareProvider(
 	sa provider.SessionAware,
 	p provider.Provider,
@@ -315,15 +334,18 @@ func (r *Router) trySessionAwareProvider(
 
 	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, toolDefs, sessionID, resume, onStatus)
 	if err != nil && resume {
-		// Resume failed — session may have expired on CLI side.
-		// Retry as a fresh session before giving up.
-		slog.Warn("resume failed, retrying as new session", "error", err)
+		// Resume failed — CLI session expired or lost.
+		// Retry as new session with conversation history as context.
+		slog.Warn("resume failed, retrying with conversation history", "error", err)
 		sessionID = generateSessionID()
 		sess.SetCLISessionID(sessionID)
 
+		// Build context from JSON history so LLM doesn't lose conversation
+		contextMsg := buildContextMessage(history)
+
 		ctx2, cancel2 := context.WithTimeout(context.Background(), r.timeout)
 		defer cancel2()
-		resp, err = sa.SendWithSession(ctx2, systemPrompt, lastMsg.Content, toolDefs, sessionID, false, onStatus)
+		resp, err = sa.SendWithSession(ctx2, systemPrompt, contextMsg, toolDefs, sessionID, false, onStatus)
 	}
 	if err != nil {
 		sess.SetCLISessionID("")
