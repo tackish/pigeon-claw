@@ -597,12 +597,15 @@ var slashCommands = []*discordgo.ApplicationCommand{
 }
 
 func (h *Handler) RegisterSlashCommands(s *discordgo.Session) {
-	for _, cmd := range slashCommands {
-		if _, err := s.ApplicationCommandCreate(s.State.User.ID, "", cmd); err != nil {
-			slog.Warn("failed to register slash command", "command", cmd.Name, "error", err)
+	// Register per-guild for instant availability (global takes up to 1 hour)
+	for _, guild := range s.State.Guilds {
+		for _, cmd := range slashCommands {
+			if _, err := s.ApplicationCommandCreate(s.State.User.ID, guild.ID, cmd); err != nil {
+				slog.Warn("failed to register slash command", "command", cmd.Name, "guild", guild.ID, "error", err)
+			}
 		}
+		slog.Info("slash commands registered", "guild", guild.ID, "count", len(slashCommands))
 	}
-	slog.Info("slash commands registered", "count", len(slashCommands))
 }
 
 func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -610,12 +613,20 @@ func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		return
 	}
 
+	// Resolve user from guild member or DM user
+	var userID string
+	if i.Member != nil {
+		userID = i.Member.User.ID
+	} else if i.User != nil {
+		userID = i.User.ID
+	}
+
 	// Create a fake MessageCreate so we can reuse handleBuiltinCommand
 	fake := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
 			ChannelID: i.ChannelID,
 			Content:   "!" + i.ApplicationCommandData().Name,
-			Author:    &discordgo.User{ID: i.Member.User.ID},
+			Author:    &discordgo.User{ID: userID},
 		},
 	}
 
