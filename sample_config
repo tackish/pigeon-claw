@@ -1,0 +1,38 @@
+# pigeon-claw config
+# Copy to ~/.pigeon-claw/config or run: pigeon-claw init
+
+# Discord
+DISCORD_TOKEN=
+# ALLOWED_CHANNELS=
+# MENTION_CHANNELS=
+
+# Provider (recommended: claude-cli with Claude Max subscription, no API key needed)
+PROVIDER_PRIORITY=claude-cli,ollama
+
+# Claude CLI (no API key needed, authenticate with: claude login)
+# ANTHROPIC_MODEL=claude-sonnet-4-20250514
+
+# API Providers (optional)
+# ANTHROPIC_API_KEY=
+# OPENAI_API_KEY=
+# GEMINI_API_KEY=
+
+# Ollama (local fallback)
+# OLLAMA_HOST=http://localhost:11434
+# OLLAMA_MODEL=gemma4:e4b
+
+# Response language (e.g., Korean, Japanese, English)
+# Leave empty to let the LLM decide based on user input
+# RESPONSE_LANGUAGE=Korean (한국어)
+
+# Custom prompt (priority: SYSTEM_PROMPT_FILE > ~/.pigeon-claw/prompt.md > SYSTEM_PROMPT)
+# SYSTEM_PROMPT_FILE=
+# SYSTEM_PROMPT=
+
+# Options
+# MAX_SESSION_MESSAGES=50
+# REQUEST_TIMEOUT=300s
+# EXEC_TIMEOUT=60s
+# MAX_TOOL_ITERATIONS=30
+# MAX_TOOL_OUTPUT=4000
+# LOG_LEVEL=info

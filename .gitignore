@@ -1,0 +1,6 @@
+.credential
+pigeon-claw
+*.exe
+*.plist
+*.log
+dist/

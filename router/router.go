@@ -1,0 +1,240 @@
+package router
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/tackish/pigeon-claw/executor"
+	"github.com/tackish/pigeon-claw/prompt"
+	"github.com/tackish/pigeon-claw/provider"
+	"github.com/tackish/pigeon-claw/session"
+	"github.com/tackish/pigeon-claw/tools"
+)
+
+type HandleResult struct {
+	Text        string
+	ImageData   []byte
+	ImagePath   string
+	TotalTokens int
+	Provider    string
+	ToolsUsed   int
+	IsFallback  bool
+	Error       bool
+}
+
+type Router struct {
+	providers     []provider.Provider
+	sessions      *session.Store
+	promptBuilder *prompt.Builder
+	executor      *executor.Executor
+	maxIterations int
+	timeout       time.Duration
+}
+
+func New(
+	providers []provider.Provider,
+	sessions *session.Store,
+	promptBuilder *prompt.Builder,
+	exec *executor.Executor,
+	maxIterations int,
+	timeout time.Duration,
+) *Router {
+	return &Router{
+		providers:     providers,
+		sessions:      sessions,
+		promptBuilder: promptBuilder,
+		executor:      exec,
+		maxIterations: maxIterations,
+		timeout:       timeout,
+	}
+}
+
+func (r *Router) Handle(channelID, content string) *HandleResult {
+	return r.HandleWithAttachments(channelID, content, nil, nil)
+}
+
+func (r *Router) HandleWithAttachments(channelID, content string, attachments []provider.ContentPart, onStatus provider.StatusCallback) *HandleResult {
+	sess := r.sessions.GetOrCreate(channelID)
+
+	msg := provider.Message{Role: provider.RoleUser, Content: content}
+	if len(attachments) > 0 {
+		// Build multimodal message: text + images
+		parts := []provider.ContentPart{}
+		if content != "" {
+			parts = append(parts, provider.ContentPart{Type: provider.ContentText, Text: content})
+		}
+		parts = append(parts, attachments...)
+		msg.Parts = parts
+	}
+	sess.Append(msg)
+
+	systemPrompt := r.promptBuilder.Build()
+	toolDefs := tools.Definitions()
+
+	// Determine provider order: if session has an active provider, try it first
+	providers := r.orderedProviders(sess.GetActiveProvider())
+
+	for i, p := range providers {
+		slog.Info("trying provider", "provider", p.Name(), "attempt", i+1)
+
+		result, err := r.tryProvider(channelID, p, systemPrompt, toolDefs, sess, i > 0, onStatus)
+		if err != nil {
+			slog.Warn("provider failed", "provider", p.Name(), "error", err)
+			continue
+		}
+
+		result.IsFallback = i > 0
+		sess.SetActiveProvider(p.Name())
+		return result
+	}
+
+	errMsg := "모든 AI 제공자에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요."
+	return &HandleResult{Text: errMsg, Error: true}
+}
+
+func (r *Router) tryProvider(
+	channelID string,
+	p provider.Provider,
+	systemPrompt string,
+	toolDefs []provider.Tool,
+	sess *session.Session,
+	isFallback bool,
+	onStatus provider.StatusCallback,
+) (*HandleResult, error) {
+	var messages []provider.Message
+
+	if isFallback {
+		// Inject context summary for fallback providers
+		contextSummary := sess.ExportContext()
+		messages = []provider.Message{
+			{Role: provider.RoleUser, Content: contextSummary},
+		}
+	} else {
+		messages = sess.History()
+	}
+
+	var lastImageData []byte
+	var lastImagePath string
+	totalTokens := 0
+	toolsUsed := 0
+
+	for iteration := 0; iteration < r.maxIterations; iteration++ {
+		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+		resp, err := p.SendWithStatus(ctx, systemPrompt, messages, toolDefs, onStatus)
+		cancel()
+
+		if err != nil {
+			return nil, fmt.Errorf("send failed: %w", err)
+		}
+
+		totalTokens += resp.Usage.TotalTokens
+		slog.Debug("token usage", "provider", p.Name(), "iteration", iteration,
+			"prompt", resp.Usage.PromptTokens, "output", resp.Usage.OutputTokens,
+			"total_this_call", resp.Usage.TotalTokens, "total_cumulative", totalTokens)
+
+		// No tool calls — final text response
+		if len(resp.ToolCalls) == 0 {
+			if resp.Content != "" {
+				sess.Append(provider.Message{Role: provider.RoleAssistant, Content: resp.Content})
+			}
+			slog.Info("request complete", "provider", p.Name(), "total_tokens", totalTokens, "tools_used", toolsUsed)
+			return &HandleResult{
+				Text:        resp.Content,
+				ImageData:   lastImageData,
+				ImagePath:   lastImagePath,
+				TotalTokens: totalTokens,
+				Provider:    p.Name(),
+				ToolsUsed:   toolsUsed,
+			}, nil
+		}
+
+		// Process tool calls
+		toolsUsed += len(resp.ToolCalls)
+
+		// First append the assistant message with tool calls info
+		toolCallSummary := resp.Content
+		if toolCallSummary == "" {
+			toolCallSummary = "[tool calls]"
+		}
+		sess.Append(provider.Message{Role: provider.RoleAssistant, Content: toolCallSummary})
+
+		// Add assistant message with tool calls to conversation
+		messages = append(messages, provider.Message{Role: provider.RoleAssistant, Content: toolCallSummary})
+
+		for _, tc := range resp.ToolCalls {
+			slog.Info("executing tool", "tool", tc.Name, "args", tc.Arguments)
+
+			result := r.executor.Execute(tc)
+
+			// Track screenshots for Discord upload
+			if tc.Name == "screenshot" && result.ImageData != nil {
+				lastImageData = result.ImageData
+				lastImagePath = result.ImagePath
+
+				// For providers that support images, add as image content
+				if p.SupportsImages() {
+					sess.Append(provider.Message{
+						Role:       provider.RoleTool,
+						Content:    result.Output,
+						ToolCallID: tc.ID,
+						Parts: []provider.ContentPart{
+							{Type: provider.ContentImage, ImageData: result.ImageData, MimeType: "image/png"},
+						},
+					})
+					messages = append(messages, provider.Message{
+						Role:       provider.RoleTool,
+						Content:    result.Output,
+						ToolCallID: tc.ID,
+						Parts: []provider.ContentPart{
+							{Type: provider.ContentImage, ImageData: result.ImageData, MimeType: "image/png"},
+						},
+					})
+				} else {
+					sess.Append(provider.Message{
+						Role:       provider.RoleTool,
+						Content:    "[Screenshot taken and sent to Discord]",
+						ToolCallID: tc.ID,
+					})
+					messages = append(messages, provider.Message{
+						Role:       provider.RoleTool,
+						Content:    "[Screenshot taken and sent to Discord]",
+						ToolCallID: tc.ID,
+					})
+				}
+			} else {
+				sess.Append(provider.Message{
+					Role:       provider.RoleTool,
+					Content:    result.Output,
+					ToolCallID: tc.ID,
+				})
+				messages = append(messages, provider.Message{
+					Role:       provider.RoleTool,
+					Content:    result.Output,
+					ToolCallID: tc.ID,
+				})
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("max tool iterations (%d) reached", r.maxIterations)
+}
+
+func (r *Router) orderedProviders(activeProvider string) []provider.Provider {
+	// Always use config priority order. ActiveProvider is only used
+	// to avoid re-exporting context when the same provider is still first.
+	return r.providers
+}
+
+func (r *Router) UpdateProviders(providers []provider.Provider) {
+	r.providers = providers
+}
+
+func (r *Router) GetProviders() []provider.Provider {
+	return r.providers
+}
+
+func (r *Router) GetSessions() *session.Store {
+	return r.sessions
+}
