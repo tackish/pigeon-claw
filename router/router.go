@@ -67,10 +67,10 @@ func New(
 }
 
 func (r *Router) Handle(channelID, content string) *HandleResult {
-	return r.HandleWithAttachments(channelID, content, nil, nil)
+	return r.HandleWithAttachments(context.Background(), channelID, content, nil, nil)
 }
 
-func (r *Router) HandleWithAttachments(channelID, content string, attachments []provider.ContentPart, onStatus provider.StatusCallback) *HandleResult {
+func (r *Router) HandleWithAttachments(ctx context.Context, channelID, content string, attachments []provider.ContentPart, onStatus provider.StatusCallback) *HandleResult {
 	sess := r.sessions.GetOrCreate(channelID)
 
 	msg := provider.Message{Role: provider.RoleUser, Content: content}
@@ -94,7 +94,7 @@ func (r *Router) HandleWithAttachments(channelID, content string, attachments []
 	for i, p := range providers {
 		slog.Info("trying provider", "provider", p.Name(), "attempt", i+1)
 
-		result, err := r.tryProvider(channelID, p, systemPrompt, toolDefs, sess, i > 0, onStatus)
+		result, err := r.tryProvider(ctx, channelID, p, systemPrompt, toolDefs, sess, i > 0, onStatus)
 		if err != nil {
 			slog.Warn("provider failed", "provider", p.Name(), "error", err)
 			r.setDebug(channelID, p.Name(), err)
@@ -120,6 +120,7 @@ func generateSessionID() string {
 }
 
 func (r *Router) tryProvider(
+	ctx context.Context,
 	channelID string,
 	p provider.Provider,
 	systemPrompt string,
@@ -130,7 +131,7 @@ func (r *Router) tryProvider(
 ) (*HandleResult, error) {
 	// Check if provider supports session-based calls (e.g., Claude CLI)
 	if sa, ok := p.(provider.SessionAware); ok && !isFallback {
-		return r.trySessionAwareProvider(sa, p, systemPrompt, toolDefs, sess, onStatus)
+		return r.trySessionAwareProvider(ctx, sa, p, systemPrompt, toolDefs, sess, onStatus)
 	}
 
 	var messages []provider.Message
@@ -151,7 +152,7 @@ func (r *Router) tryProvider(
 	toolsUsed := 0
 
 	for iteration := 0; iteration < r.maxIterations; iteration++ {
-		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+		ctx, cancel := context.WithTimeout(ctx, r.timeout)
 		resp, err := p.SendWithStatus(ctx, systemPrompt, messages, toolDefs, onStatus)
 		cancel()
 
@@ -305,6 +306,7 @@ func buildContextMessage(history []provider.Message) string {
 }
 
 func (r *Router) trySessionAwareProvider(
+	parentCtx context.Context,
 	sa provider.SessionAware,
 	p provider.Provider,
 	systemPrompt string,
@@ -329,7 +331,7 @@ func (r *Router) trySessionAwareProvider(
 
 	slog.Info("session-aware call", "provider", p.Name(), "session_id", sessionID, "resume", resume)
 
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	ctx, cancel := context.WithTimeout(parentCtx, r.timeout)
 	defer cancel()
 
 	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, toolDefs, sessionID, resume, onStatus)
@@ -343,7 +345,7 @@ func (r *Router) trySessionAwareProvider(
 		// Build context from JSON history so LLM doesn't lose conversation
 		contextMsg := buildContextMessage(history)
 
-		ctx2, cancel2 := context.WithTimeout(context.Background(), r.timeout)
+		ctx2, cancel2 := context.WithTimeout(parentCtx, r.timeout)
 		defer cancel2()
 		resp, err = sa.SendWithSession(ctx2, systemPrompt, contextMsg, toolDefs, sessionID, false, onStatus)
 	}

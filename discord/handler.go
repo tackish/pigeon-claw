@@ -2,12 +2,14 @@ package discord
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +46,7 @@ type Handler struct {
 	channelLocks    sync.Map // map[channelID]*sync.Mutex
 	retryMessages   sync.Map // map[messageID]*retryInfo
 	activeRequests  sync.Map // map[channelID]string — content being processed
+	cancelFuncs     sync.Map // map[channelID]context.CancelFunc
 	mu              sync.RWMutex
 	allowedChannels map[string]bool
 	mentionChannels map[string]bool
@@ -157,6 +160,12 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	h.activeRequests.Store(m.ChannelID, m.Content)
 	defer h.activeRequests.Delete(m.ChannelID)
 
+	// Create cancellable context for !cancel support
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancelFuncs.Store(m.ChannelID, cancel)
+	defer h.cancelFuncs.Delete(m.ChannelID)
+	defer cancel()
+
 	// React to indicate processing
 	if err := s.MessageReactionAdd(m.ChannelID, m.ID, "👀"); err != nil {
 		slog.Warn("failed to add reaction", "emoji", "👀", "error", err)
@@ -183,7 +192,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	}
 
 	// Route to LLM
-	result := h.router.HandleWithAttachments(m.ChannelID, m.Content, attachments, onStatus)
+	result := h.router.HandleWithAttachments(ctx, m.ChannelID, m.Content, attachments, onStatus)
 
 	// Clean up status message
 	if statusMsgID != "" {
@@ -317,15 +326,25 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 				slog.Error("cannot find binary for restart", "error", err)
 				return
 			}
-			// Start new process then exit current one.
-			// If running under launchd with KeepAlive, launchd handles it.
-			// If running foreground, the new process takes over.
+			// Release PID lock before exit (os.Exit skips defers)
+			home, _ := os.UserHomeDir()
+			os.Remove(filepath.Join(home, ".pigeon-claw", "pigeon-claw.pid"))
+
 			cmd := exec.Command(exe, "serve")
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			cmd.Start()
 			os.Exit(0)
 		}()
+		return true
+
+	case content == "!cancel":
+		if cancel, ok := h.cancelFuncs.LoadAndDelete(m.ChannelID); ok {
+			cancel.(context.CancelFunc)()
+			s.ChannelMessageSend(m.ChannelID, "-# 현재 요청을 취소했습니다.")
+		} else {
+			s.ChannelMessageSend(m.ChannelID, "-# 처리 중인 요청이 없습니다.")
+		}
 		return true
 
 	case content == "!status":
@@ -530,7 +549,7 @@ func (h *Handler) OnReactionAdd(s *discordgo.Session, r *discordgo.MessageReacti
 	}
 
 	// Retry the request
-	result := h.router.HandleWithAttachments(info.channelID, info.content, attachments, onStatus)
+	result := h.router.HandleWithAttachments(context.Background(), info.channelID, info.content, attachments, onStatus)
 
 	if statusMsgID != "" {
 		s.ChannelMessageDelete(r.ChannelID, statusMsgID)
