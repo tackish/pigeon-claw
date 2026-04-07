@@ -173,23 +173,63 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	// Build message with attachments
 	attachments := h.downloadAttachments(m.Attachments)
 
-	// Status callback for intermediate updates
+	// Status message: show progress with elapsed time
+	preview := m.Content
+	if len(preview) > 60 {
+		preview = preview[:60] + "..."
+	}
+
+	startTime := time.Now()
 	var statusMsgID string
-	onStatus := func(status string) {
-		if statusMsgID == "" {
-			msg, err := s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# %s", status))
-			if err == nil {
-				statusMsgID = msg.ID
+	var lastStatus string
+	var statusMu sync.Mutex
+
+	// Create initial status message
+	initMsg, err := s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# ⏳ `%s` 처리 중...", preview))
+	if err == nil {
+		statusMsgID = initMsg.ID
+	}
+
+	// Periodic elapsed time updater
+	statusDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-statusDone:
+				return
+			case <-ticker.C:
+				statusMu.Lock()
+				elapsed := time.Since(startTime).Truncate(time.Second)
+				text := fmt.Sprintf("-# ⏳ %s 경과", elapsed)
+				if lastStatus != "" {
+					text += fmt.Sprintf(" | %s", lastStatus)
+				}
+				if statusMsgID != "" {
+					s.ChannelMessageEdit(m.ChannelID, statusMsgID, text)
+				}
+				statusMu.Unlock()
 			}
-		} else {
-			s.ChannelMessageEdit(m.ChannelID, statusMsgID, fmt.Sprintf("-# %s", status))
+		}
+	}()
+
+	onStatus := func(status string) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		lastStatus = status
+		elapsed := time.Since(startTime).Truncate(time.Second)
+		text := fmt.Sprintf("-# ⏳ %s 경과 | %s", elapsed, status)
+		if statusMsgID != "" {
+			s.ChannelMessageEdit(m.ChannelID, statusMsgID, text)
 		}
 	}
 
 	// Route to LLM
 	result := h.router.HandleWithAttachments(ctx, m.ChannelID, m.Content, attachments, onStatus)
 
-	// Clean up status message
+	// Stop elapsed time updater and clean up status message
+	close(statusDone)
 	if statusMsgID != "" {
 		s.ChannelMessageDelete(m.ChannelID, statusMsgID)
 	}
@@ -587,16 +627,24 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "help", Description: "Show available commands"},
 	{Name: "reset", Description: "Reset current channel session"},
 	{Name: "cancel", Description: "Cancel the current request"},
-	{Name: "restart", Description: "Restart the bot process"},
-	{Name: "status", Description: "Show provider and message count"},
-	{Name: "debug", Description: "Show last error and session info"},
-	{Name: "model", Description: "List all provider models"},
-	{Name: "provider", Description: "Show provider priority"},
+	{Name: "restart", Description: "Restart bot (includes update check)"},
+	{Name: "status", Description: "Show active provider and message count"},
+	{Name: "debug", Description: "Show last error, session ID, debug info"},
+	{Name: "model", Description: "List or change provider models"},
+	{Name: "provider", Description: "Show provider priority order"},
 }
 
 func (h *Handler) RegisterSlashCommands(s *discordgo.Session) {
-	// Register per-guild for instant availability (global takes up to 1 hour)
 	for _, guild := range s.State.Guilds {
+		// Remove stale commands from previous registrations
+		existing, err := s.ApplicationCommands(s.State.User.ID, guild.ID)
+		if err == nil {
+			for _, cmd := range existing {
+				s.ApplicationCommandDelete(s.State.User.ID, guild.ID, cmd.ID)
+			}
+		}
+
+		// Register fresh commands
 		for _, cmd := range slashCommands {
 			if _, err := s.ApplicationCommandCreate(s.State.User.ID, guild.ID, cmd); err != nil {
 				slog.Warn("failed to register slash command", "command", cmd.Name, "guild", guild.ID, "error", err)
