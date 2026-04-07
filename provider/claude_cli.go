@@ -53,6 +53,28 @@ func (c *ClaudeCLI) Send(ctx context.Context, systemPrompt string, messages []Me
 	return c.SendWithStatus(ctx, systemPrompt, messages, tools, nil)
 }
 
+func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, message string, tools []Tool, sessionID string, resume bool, onStatus StatusCallback) (*Response, error) {
+	claudeBin := findClaudeBin()
+
+	args := []string{
+		"-p", message,
+		"--model", c.model,
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose",
+	}
+	if resume {
+		// Resume existing session: --resume <session-id>
+		args = append(args, "--resume", sessionID)
+	} else {
+		// First turn: create session with UUID + system prompt
+		args = append(args, "--session-id", sessionID, "--system-prompt", systemPrompt)
+	}
+
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
+	return c.executeCmd(ctx, cmd, onStatus)
+}
+
 func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onStatus StatusCallback) (*Response, error) {
 	prompt := c.buildPrompt(systemPrompt, messages)
 	claudeBin := findClaudeBin()
@@ -65,10 +87,17 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 		"--verbose",
 	)
 
+	return c.executeCmd(ctx, cmd, onStatus)
+}
+
+func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus StatusCallback) (*Response, error) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
+
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start claude cli: %w", err)
@@ -109,7 +138,6 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 
 		switch event.Type {
 		case "assistant":
-			// Assistant started responding
 			if onStatus != nil {
 				onStatus("thinking...")
 			}
@@ -126,7 +154,6 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 			totalInput = event.Usage.InputTokens
 			totalOutput = event.Usage.OutputTokens
 		default:
-			// Accumulate text content
 			if event.Content != "" {
 				finalText.WriteString(event.Content)
 			}
@@ -139,8 +166,11 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 		}
 		text := finalText.String()
 		if text != "" {
-			// Got partial output before error
 			return &Response{Content: text}, nil
+		}
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" {
+			return nil, fmt.Errorf("claude cli error: %w, stderr: %s", err, stderr)
 		}
 		return nil, fmt.Errorf("claude cli error: %w", err)
 	}

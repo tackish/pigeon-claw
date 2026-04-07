@@ -65,7 +65,7 @@ func runInit() {
 
 	switch choice {
 	case "1":
-		providerPriority = "claude-cli,ollama"
+		providerPriority = "claude-cli"
 		fmt.Println()
 		fmt.Println("  Claude CLI selected. Checking installation...")
 		claudePath := findClaude()
@@ -91,22 +91,22 @@ func runInit() {
 		fmt.Println("  Make sure ollama is running: brew services start ollama")
 		fmt.Printf("  And pull the model: ollama pull %s\n", model)
 	case "3":
-		providerPriority = "claude,ollama"
+		providerPriority = "claude"
 		fmt.Print("  Anthropic API key: ")
 		key, _ := reader.ReadString('\n')
 		extraEnv = fmt.Sprintf("ANTHROPIC_API_KEY=%s\n", strings.TrimSpace(key))
 	case "4":
-		providerPriority = "openai,ollama"
+		providerPriority = "openai"
 		fmt.Print("  OpenAI API key: ")
 		key, _ := reader.ReadString('\n')
 		extraEnv = fmt.Sprintf("OPENAI_API_KEY=%s\n", strings.TrimSpace(key))
 	case "5":
-		providerPriority = "gemini,ollama"
+		providerPriority = "gemini"
 		fmt.Print("  Gemini API key: ")
 		key, _ := reader.ReadString('\n')
 		extraEnv = fmt.Sprintf("GEMINI_API_KEY=%s\n", strings.TrimSpace(key))
 	default:
-		providerPriority = "claude-cli,ollama"
+		providerPriority = "claude-cli"
 	}
 
 	fmt.Println()
@@ -136,8 +136,44 @@ func runInit() {
 
 	fmt.Println()
 
-	// Step 4: Custom Prompt
-	fmt.Println("[4/5] Custom System Prompt")
+	// Step 4: Language
+	fmt.Println("[4/6] Response Language")
+	fmt.Println()
+	fmt.Println("  1. 한국어 (Korean)")
+	fmt.Println("  2. English")
+	fmt.Println("  3. 日本語 (Japanese)")
+	fmt.Println("  4. 中文 (Chinese)")
+	fmt.Println()
+	fmt.Print("  Choose [1-4, default=1]: ")
+	langChoice, _ := reader.ReadString('\n')
+	langChoice = strings.TrimSpace(langChoice)
+	if langChoice == "" {
+		langChoice = "1"
+	}
+
+	var responseLang string
+	switch langChoice {
+	case "1":
+		responseLang = "korean"
+		fmt.Println("  ✓ 한국어")
+	case "2":
+		responseLang = ""
+		fmt.Println("  ✓ English")
+	case "3":
+		responseLang = "japanese"
+		fmt.Println("  ✓ 日本語")
+	case "4":
+		responseLang = "chinese"
+		fmt.Println("  ✓ 中文")
+	default:
+		responseLang = "korean"
+		fmt.Println("  ✓ 한국어")
+	}
+
+	fmt.Println()
+
+	// Step 5: Custom Prompt
+	fmt.Println("[5/6] Custom System Prompt")
 	fmt.Println()
 	fmt.Println("  The system prompt tells the LLM how to behave.")
 	fmt.Println("  A default prompt is built-in (based on openclaw's approach):")
@@ -175,8 +211,8 @@ func runInit() {
 
 	fmt.Println()
 
-	// Step 5: Timeout
-	fmt.Println("[5/5] Advanced Settings")
+	// Step 6: Timeout
+	fmt.Println("[6/6] Advanced Settings")
 	fmt.Println()
 	fmt.Print("  Request timeout [default=300s]: ")
 	timeout, _ := reader.ReadString('\n')
@@ -198,6 +234,9 @@ func runInit() {
 	}
 	if channelEnv != "" {
 		env.WriteString(channelEnv)
+	}
+	if responseLang != "" {
+		env.WriteString(fmt.Sprintf("RESPONSE_LANGUAGE=%s\n", responseLang))
 	}
 	env.WriteString(fmt.Sprintf("REQUEST_TIMEOUT=%s\n", timeout))
 	env.WriteString("LOG_LEVEL=info\n")

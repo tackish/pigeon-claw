@@ -17,6 +17,7 @@ type Session struct {
 	ChannelID      string             `json:"channel_id"`
 	Messages       []provider.Message `json:"messages"`
 	ActiveProvider string             `json:"active_provider"`
+	CLISessionID   string             `json:"cli_session_id,omitempty"`
 	maxMessages    int
 	sessionDir     string
 }
@@ -61,6 +62,7 @@ func (s *Store) Reset(channelID string) {
 		sess.mu.Lock()
 		sess.Messages = make([]provider.Message, 0)
 		sess.ActiveProvider = ""
+		sess.CLISessionID = ""
 		sess.mu.Unlock()
 		sess.save()
 	}
@@ -99,6 +101,19 @@ func (sess *Session) GetActiveProvider() string {
 func (sess *Session) SetActiveProvider(name string) {
 	sess.mu.Lock()
 	sess.ActiveProvider = name
+	sess.mu.Unlock()
+	sess.save()
+}
+
+func (sess *Session) GetCLISessionID() string {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.CLISessionID
+}
+
+func (sess *Session) SetCLISessionID(id string) {
+	sess.mu.Lock()
+	sess.CLISessionID = id
 	sess.mu.Unlock()
 	sess.save()
 }

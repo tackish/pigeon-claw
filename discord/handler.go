@@ -31,9 +31,16 @@ var imageContentTypes = map[string]bool{
 	"image/webp": true,
 }
 
+type retryInfo struct {
+	channelID   string
+	content     string
+	attachments []*discordgo.MessageAttachment
+}
+
 type Handler struct {
 	router          *router.Router
 	channelLocks    sync.Map // map[channelID]*sync.Mutex
+	retryMessages   sync.Map // map[messageID]*retryInfo
 	mu              sync.RWMutex
 	allowedChannels map[string]bool
 	mentionChannels map[string]bool
@@ -171,10 +178,18 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	// Remove processing emoji
 	s.MessageReactionRemove(m.ChannelID, m.ID, "👀", s.State.User.ID)
 
-	// Error case
+	// Error case: send error message with 🔄 for retry
 	if result.Error {
 		s.MessageReactionAdd(m.ChannelID, m.ID, "❌")
-		s.ChannelMessageSend(m.ChannelID, h.msgs.AllProvidersFailed)
+		errMsg, _ := s.ChannelMessageSend(m.ChannelID, h.msgs.AllProvidersFailed)
+		if errMsg != nil {
+			s.MessageReactionAdd(m.ChannelID, errMsg.ID, "🔄")
+			h.retryMessages.Store(errMsg.ID, &retryInfo{
+				channelID:   m.ChannelID,
+				content:     m.Content,
+				attachments: m.Attachments,
+			})
+		}
 		return
 	}
 
@@ -300,6 +315,33 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		s.ChannelMessageSend(m.ChannelID, sb.String())
 		return true
 
+	case content == "!debug":
+		sess := h.router.GetSessions().GetOrCreate(m.ChannelID)
+		debug := h.router.GetDebug(m.ChannelID)
+
+		var sb strings.Builder
+		sb.WriteString("**Debug Info**\n")
+		sb.WriteString(fmt.Sprintf("- Channel: `%s`\n", m.ChannelID))
+		sb.WriteString(fmt.Sprintf("- Active Provider: `%s`\n", sess.GetActiveProvider()))
+		sb.WriteString(fmt.Sprintf("- Session Messages: %d\n", sess.MessageCount()))
+		sb.WriteString(fmt.Sprintf("- CLI Session ID: `%s`\n", sess.GetCLISessionID()))
+		sb.WriteString("\n**Providers**\n")
+		for i, p := range h.router.GetProviders() {
+			sb.WriteString(fmt.Sprintf("%d. %s (`%s`)\n", i+1, p.Name(), p.Model()))
+		}
+
+		if debug != nil {
+			sb.WriteString(fmt.Sprintf("\n**Last Error**\n"))
+			sb.WriteString(fmt.Sprintf("- Provider: `%s`\n", debug.LastProvider))
+			sb.WriteString(fmt.Sprintf("- Time: %s\n", debug.LastErrorAt.Format("2006-01-02 15:04:05")))
+			sb.WriteString(fmt.Sprintf("- Error:\n```\n%s\n```\n", debug.LastError))
+		} else {
+			sb.WriteString("\n*No errors recorded for this channel.*\n")
+		}
+
+		s.ChannelMessageSend(m.ChannelID, sb.String())
+		return true
+
 	case content == "!model":
 		var sb strings.Builder
 		sb.WriteString("**Models**\n")
@@ -342,7 +384,7 @@ func (h *Handler) sendLongMessage(s *discordgo.Session, channelID, text string) 
 	// Very long output: upload as file
 	if len(text) > fileUploadThreshold {
 		s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Content: text[:maxDiscordMessage-50] + "\n\n... (전체 내용은 첨부 파일 참조)",
+			Content: text[:maxDiscordMessage-50] + "\n\n" + h.msgs.SeeAttachment,
 			Files: []*discordgo.File{
 				{
 					Name:   "response.txt",
@@ -413,4 +455,74 @@ func (h *Handler) startTyping(s *discordgo.Session, channelID string) func() {
 		}
 	}()
 	return func() { close(done) }
+}
+
+func (h *Handler) OnReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAdd) {
+	// Ignore bot's own reactions
+	if r.UserID == s.State.User.ID {
+		return
+	}
+	if r.Emoji.Name != "🔄" {
+		return
+	}
+
+	val, ok := h.retryMessages.LoadAndDelete(r.MessageID)
+	if !ok {
+		return
+	}
+	info := val.(*retryInfo)
+
+	// Delete the error message
+	s.ChannelMessageDelete(r.ChannelID, r.MessageID)
+
+	// Build attachments
+	attachments := h.downloadAttachments(info.attachments)
+
+	// React to indicate processing
+	s.ChannelTyping(r.ChannelID)
+
+	// Status callback
+	var statusMsgID string
+	onStatus := func(status string) {
+		if statusMsgID == "" {
+			msg, err := s.ChannelMessageSend(r.ChannelID, fmt.Sprintf("-# %s", status))
+			if err == nil {
+				statusMsgID = msg.ID
+			}
+		} else {
+			s.ChannelMessageEdit(r.ChannelID, statusMsgID, fmt.Sprintf("-# %s", status))
+		}
+	}
+
+	// Retry the request
+	result := h.router.HandleWithAttachments(info.channelID, info.content, attachments, onStatus)
+
+	if statusMsgID != "" {
+		s.ChannelMessageDelete(r.ChannelID, statusMsgID)
+	}
+
+	if result.Error {
+		errMsg, _ := s.ChannelMessageSend(r.ChannelID, h.msgs.AllProvidersFailed)
+		if errMsg != nil {
+			s.MessageReactionAdd(r.ChannelID, errMsg.ID, "🔄")
+			h.retryMessages.Store(errMsg.ID, info)
+		}
+		return
+	}
+
+	if result.ImageData != nil {
+		s.ChannelMessageSendComplex(r.ChannelID, &discordgo.MessageSend{
+			Files: []*discordgo.File{{Name: "screenshot.png", Reader: bytes.NewReader(result.ImageData)}},
+		})
+	}
+	if result.Text != "" {
+		h.sendLongMessage(s, r.ChannelID, result.Text)
+	}
+	if result.TotalTokens > 0 {
+		footer := fmt.Sprintf("-# %s | %d tokens", result.Provider, result.TotalTokens)
+		if result.ToolsUsed > 0 {
+			footer += fmt.Sprintf(" | %d tools", result.ToolsUsed)
+		}
+		s.ChannelMessageSend(r.ChannelID, footer)
+	}
 }

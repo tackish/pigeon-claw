@@ -5,8 +5,28 @@ import (
 	"testing"
 )
 
+// clearConfigEnv removes all config-related env vars so tests are isolated
+// from the user's ~/.pigeon-claw/config file.
+func clearConfigEnv() {
+	for _, key := range []string{
+		"DISCORD_TOKEN", "PROVIDER_PRIORITY", "ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY", "GEMINI_API_KEY", "OLLAMA_HOST", "OLLAMA_MODEL",
+		"ANTHROPIC_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "SYSTEM_PROMPT",
+		"SYSTEM_PROMPT_FILE", "LOG_LEVEL", "RESPONSE_LANGUAGE",
+		"MAX_SESSION_MESSAGES", "MAX_TOOL_ITERATIONS", "MAX_TOOL_OUTPUT",
+		"REQUEST_TIMEOUT", "EXEC_TIMEOUT", "SESSION_DIR",
+		"ALLOWED_CHANNELS", "MENTION_CHANNELS",
+	} {
+		os.Unsetenv(key)
+	}
+}
+
 func TestLoadRequiresDiscordToken(t *testing.T) {
-	os.Unsetenv("DISCORD_TOKEN")
+	clearConfigEnv()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", t.TempDir())
+	defer os.Setenv("HOME", origHome)
+
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error when DISCORD_TOKEN is missing")
@@ -14,8 +34,13 @@ func TestLoadRequiresDiscordToken(t *testing.T) {
 }
 
 func TestLoadDefaults(t *testing.T) {
+	clearConfigEnv()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", t.TempDir())
+	defer os.Setenv("HOME", origHome)
+
 	os.Setenv("DISCORD_TOKEN", "test-token")
-	defer os.Unsetenv("DISCORD_TOKEN")
+	defer clearConfigEnv()
 
 	cfg, err := Load()
 	if err != nil {

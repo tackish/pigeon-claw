@@ -37,7 +37,7 @@ openclaw (typical request):
 
 pigeon-claw (same request):
   System prompt: ~300 tokens (concise, no bloat)
-  Conversation:  Sliding window (last 50 messages only)
+  Conversation:  Claude CLI session resume (only new message sent per turn)
   Memory:        None in prompt (sessions persisted to disk, not context)
   Total per turn: 1,000–5,000 tokens
 ```
@@ -49,7 +49,7 @@ pigeon-claw (same request):
 | | pigeon-claw | openclaw / others |
 |---|---|---|
 | **System prompt** | ~300 tokens, action-oriented | ~8,000+ tokens, multi-file injection |
-| **Context management** | Sliding window (last N messages) | Full history replay every turn |
+| **Context management** | Claude CLI session resume (new message only) | Full history replay every turn |
 | **Memory** | File-persisted sessions, zero prompt overhead | Vector DB + JSONL loaded into context |
 | **Language** | Go (single binary, zero runtime deps) | Node.js / Python |
 | **Providers** | Claude CLI + OpenAI + Gemini + Ollama | Claude only |
@@ -335,98 +335,23 @@ When `claude-cli` is running a complex task, you'll also see intermediate status
 
 ## Architecture
 
-### Message Flow
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant D as Discord
-    participant H as Handler
-    participant S as Session
-    participant R as Router
-    participant P as Provider
-    participant E as Executor
-
-    U->>D: Send message
-    D->>H: WebSocket event
-    H->>H: 👀 React to message
-    H->>S: Load/create session
-    S-->>H: Conversation history
-    H->>R: HandleWithAttachments()
-    R->>P: SendWithStatus()
-
-    alt claude-cli
-        P->>P: claude -p (stream-json)
-        P-->>H: Status callback (🔧 tool_name)
-        P-->>R: Final response
-    else API provider (tool use loop)
-        loop Until text response or max iterations
-            P-->>R: ToolCall response
-            R->>E: Execute tool
-            E-->>R: Tool result
-            R->>P: Send with tool result
-        end
-        P-->>R: Text response
-    end
-
-    R->>S: Append assistant message
-    S->>S: Save to channel_{id}.json
-    R-->>H: HandleResult
-    H->>D: Send response + token footer
-    H->>H: ✅ React to message
-    D-->>U: Bot reply
-```
-
-### Session Persistence
-
 ```mermaid
 flowchart LR
-    subgraph Discord
-        CH1[Channel A]
-        CH2[Channel B]
-        CH3[Channel C]
-    end
+    U[Discord User] --> H[Handler]
+    H --> R[Router]
+    R --> S[(Session)]
+    R --> P1[claude-cli]
+    R -.->|failover| P2[ollama / API]
 
-    subgraph pc [pigeon-claw]
-        H[Handler]
-        R[Router]
-        SS[Session Store]
-    end
+    P1 -->|"--resume --session-id"| CLI[Claude CLI]
+    P2 -->|full history| LLM[LLM API]
 
-    subgraph disk [Sessions Disk]
-        F1[channel_A.json]
-        F2[channel_B.json]
-        F3[channel_C.json]
-    end
-
-    subgraph prov [Providers]
-        P1[claude-cli]
-        P2[ollama]
-    end
-
-    CH1 --> H
-    CH2 --> H
-    CH3 --> H
-    H --> R
-    R --> SS
-    SS <--> F1
-    SS <--> F2
-    SS <--> F3
-    R --> P1
-    P1 -.->|failover| P2
+    CLI --> H
+    LLM --> H
+    H --> U
 ```
 
-### Provider Failover
-
-```mermaid
-flowchart TD
-    MSG[User Message] --> P1{Provider 1}
-    P1 -->|Success| DONE[Respond]
-    P1 -->|Error/Timeout| EXPORT[Export context to markdown]
-    EXPORT --> P2{Provider 2 fallback}
-    P2 -->|Success| DONE2[Respond with fallback]
-    P2 -->|Error| FAIL[All providers failed]
-```
+**Claude CLI** uses `--session-id` + `--resume` — only the new message is sent each turn, not the full history. Other providers fall back to sliding window (last N messages).
 
 ---
 

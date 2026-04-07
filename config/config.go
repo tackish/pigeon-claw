@@ -169,8 +169,13 @@ func envOrDefaultInt(key string, defaultVal int) int {
 
 func envOrDefaultDuration(key string, defaultVal time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
+		// Try standard duration format first (e.g., "30s", "5m")
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+		// Fallback: treat plain numbers as seconds (e.g., "600" → 600s)
+		if secs, err := strconv.Atoi(v); err == nil {
+			return time.Duration(secs) * time.Second
 		}
 	}
 	return defaultVal

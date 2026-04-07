@@ -74,3 +74,11 @@ type Provider interface {
 	SendWithStatus(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onStatus StatusCallback) (*Response, error)
 	SupportsImages() bool
 }
+
+// SessionAware is an optional interface for providers that support
+// persistent sessions (e.g., Claude CLI with --session-id/--resume).
+// When implemented, the router will pass session IDs to avoid resending
+// full conversation history on every turn.
+type SessionAware interface {
+	SendWithSession(ctx context.Context, systemPrompt string, message string, tools []Tool, sessionID string, resume bool, onStatus StatusCallback) (*Response, error)
+}

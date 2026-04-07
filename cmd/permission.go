@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -117,6 +118,19 @@ func findClaude() string {
 	return ""
 }
 
+func getCurrentBinaryPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "pigeon-claw"
+	}
+	// Resolve symlinks
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return exe
+	}
+	return resolved
+}
+
 func checkMacPermissions(reader *bufio.Reader) {
 	checks := []permCheck{
 		{
@@ -141,6 +155,9 @@ func checkMacPermissions(reader *bufio.Reader) {
 		},
 	}
 
+	binaryPath := getCurrentBinaryPath()
+	fmt.Printf("  Binary: %s\n\n", binaryPath)
+
 	allPassed := true
 
 	for _, check := range checks {
@@ -153,7 +170,9 @@ func checkMacPermissions(reader *bufio.Reader) {
 
 		fmt.Printf("    ✗ Not granted. Opening System Settings...\n")
 		openPrivacyPane(check.urlParam)
-		fmt.Printf("    Add this binary to the list, then press Enter: ")
+		fmt.Printf("    Add this binary to the list:\n")
+		fmt.Printf("      %s\n", binaryPath)
+		fmt.Printf("    Then press Enter: ")
 		reader.ReadString('\n')
 
 		if check.testFn() {

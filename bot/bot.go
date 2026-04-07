@@ -45,6 +45,7 @@ func New(cfg *config.Config) (*Bot, error) {
 	handler := discord.NewHandler(rtr, cfg.AllowedChannels, cfg.MentionChannels, cfg.ResponseLanguage)
 
 	dg.AddHandler(handler.OnMessageCreate)
+	dg.AddHandler(handler.OnReactionAdd)
 
 	return &Bot{
 		cfg:     cfg,

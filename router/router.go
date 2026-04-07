@@ -2,8 +2,10 @@ package router
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/tackish/pigeon-claw/executor"
@@ -24,6 +26,14 @@ type HandleResult struct {
 	Error       bool
 }
 
+// DebugInfo holds diagnostic info for the !debug command.
+type DebugInfo struct {
+	LastError    string
+	LastErrorAt  time.Time
+	LastProvider string
+	ChannelID    string
+}
+
 type Router struct {
 	providers     []provider.Provider
 	sessions      *session.Store
@@ -31,6 +41,9 @@ type Router struct {
 	executor      *executor.Executor
 	maxIterations int
 	timeout       time.Duration
+
+	debugMu   sync.Mutex
+	debugInfo map[string]*DebugInfo // per channel
 }
 
 func New(
@@ -48,6 +61,7 @@ func New(
 		executor:      exec,
 		maxIterations: maxIterations,
 		timeout:       timeout,
+		debugInfo:     make(map[string]*DebugInfo),
 	}
 }
 
@@ -82,6 +96,7 @@ func (r *Router) HandleWithAttachments(channelID, content string, attachments []
 		result, err := r.tryProvider(channelID, p, systemPrompt, toolDefs, sess, i > 0, onStatus)
 		if err != nil {
 			slog.Warn("provider failed", "provider", p.Name(), "error", err)
+			r.setDebug(channelID, p.Name(), err)
 			continue
 		}
 
@@ -90,8 +105,17 @@ func (r *Router) HandleWithAttachments(channelID, content string, attachments []
 		return result
 	}
 
-	errMsg := "모든 AI 제공자에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요."
-	return &HandleResult{Text: errMsg, Error: true}
+	return &HandleResult{Error: true}
+}
+
+func generateSessionID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	// UUID v4 format
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func (r *Router) tryProvider(
@@ -103,6 +127,11 @@ func (r *Router) tryProvider(
 	isFallback bool,
 	onStatus provider.StatusCallback,
 ) (*HandleResult, error) {
+	// Check if provider supports session-based calls (e.g., Claude CLI)
+	if sa, ok := p.(provider.SessionAware); ok && !isFallback {
+		return r.trySessionAwareProvider(sa, p, systemPrompt, toolDefs, sess, onStatus)
+	}
+
 	var messages []provider.Message
 
 	if isFallback {
@@ -237,4 +266,69 @@ func (r *Router) GetProviders() []provider.Provider {
 
 func (r *Router) GetSessions() *session.Store {
 	return r.sessions
+}
+
+func (r *Router) setDebug(channelID, providerName string, err error) {
+	r.debugMu.Lock()
+	defer r.debugMu.Unlock()
+	r.debugInfo[channelID] = &DebugInfo{
+		LastError:    err.Error(),
+		LastErrorAt:  time.Now(),
+		LastProvider: providerName,
+		ChannelID:    channelID,
+	}
+}
+
+func (r *Router) GetDebug(channelID string) *DebugInfo {
+	r.debugMu.Lock()
+	defer r.debugMu.Unlock()
+	return r.debugInfo[channelID]
+}
+
+func (r *Router) trySessionAwareProvider(
+	sa provider.SessionAware,
+	p provider.Provider,
+	systemPrompt string,
+	toolDefs []provider.Tool,
+	sess *session.Session,
+	onStatus provider.StatusCallback,
+) (*HandleResult, error) {
+	// Determine session ID and whether to resume
+	sessionID := sess.GetCLISessionID()
+	resume := sessionID != ""
+	if !resume {
+		sessionID = generateSessionID()
+		sess.SetCLISessionID(sessionID)
+	}
+
+	// Get the latest user message only (already appended to session)
+	history := sess.History()
+	if len(history) == 0 {
+		return nil, fmt.Errorf("no messages in session")
+	}
+	lastMsg := history[len(history)-1]
+
+	slog.Info("session-aware call", "provider", p.Name(), "session_id", sessionID, "resume", resume)
+
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+
+	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, toolDefs, sessionID, resume, onStatus)
+	if err != nil {
+		// Session might be corrupted; reset and let caller retry with fallback
+		sess.SetCLISessionID("")
+		return nil, fmt.Errorf("session-aware send failed: %w", err)
+	}
+
+	if resp.Content != "" {
+		sess.Append(provider.Message{Role: provider.RoleAssistant, Content: resp.Content})
+	}
+
+	slog.Info("request complete", "provider", p.Name(), "total_tokens", resp.Usage.TotalTokens)
+
+	return &HandleResult{
+		Text:        resp.Content,
+		TotalTokens: resp.Usage.TotalTokens,
+		Provider:    p.Name(),
+	}, nil
 }
