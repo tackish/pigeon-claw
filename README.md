@@ -99,15 +99,28 @@ make build
 
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
 2. Click **New Application** → enter a name → **Create**
+<img width="1472" height="295" alt="image" src="https://github.com/user-attachments/assets/cfd2d291-5515-42dc-88cf-6269cc2488dd" />
+
 3. Go to **Bot** tab (left sidebar):
+
+<img width="1469" height="894" alt="image" src="https://github.com/user-attachments/assets/3f006ea5-08cc-4383-9cfd-0e90ab3e743a" />
+
    - Click **Reset Token** → **Copy** the token (you'll need this later)
    - Scroll down to **Privileged Gateway Intents**:
      - Enable **Message Content Intent** (required — without this, the bot receives empty messages)
    - Scroll up to **Authorization Flow**:
      - Make sure **Requires OAuth2 Code Grant** is **OFF**
-4. Go to **OAuth2** tab (left sidebar):
+5. Go to **OAuth2** tab (left sidebar):
+
+<img width="1390" height="741" alt="image" src="https://github.com/user-attachments/assets/34e2326f-81ea-4ecb-9025-5f2febdbe9dc" />
+
    - Under **OAuth2 URL Generator**, check only **`bot`** in Scopes
-   - Under **Bot Permissions**, check: `Send Messages`, `Attach Files`, `Read Message History`, `View Channels`, `Embed Links`, `Add Reactions`
+
+<img width="1395" height="814" alt="image" src="https://github.com/user-attachments/assets/26ba2e58-dc57-49b2-9430-497ba9f85ee5" />
+
+   - Under **Bot Permissions**, check: `Send Messages`, `Attach Files`, `Read Message History`, `View Channels`, `Embed Links`, `Add Reactions or Administrator`
+<img width="1414" height="226" alt="image" src="https://github.com/user-attachments/assets/73d26e30-44cd-43a2-ba6a-537da93be932" />
+
    - Copy the generated URL at the bottom
    - Open it in your browser → select your server → **Authorize**
 
