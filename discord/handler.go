@@ -357,7 +357,7 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		return true
 
 	case content == "!restart":
-		s.ChannelMessageSend(m.ChannelID, "-# Restarting pigeon-claw...")
+		s.ChannelMessageSend(m.ChannelID, "-# 재시작 중...")
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 
@@ -375,8 +375,10 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 				return
 			}
 
-			// Replace current process with new binary
-			syscall.Exec(exe, []string{exe, "serve"}, os.Environ())
+			// Pass restart channel so new process can send completion message
+			env := os.Environ()
+			env = append(env, "PIGEON_RESTART_CHANNEL="+m.ChannelID)
+			syscall.Exec(exe, []string{exe, "serve"}, env)
 		}()
 		return true
 

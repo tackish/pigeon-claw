@@ -67,6 +67,12 @@ func (b *Bot) Run() error {
 	// Register slash commands
 	b.handler.RegisterSlashCommands(b.session)
 
+	// Send restart completion message if restarted via !restart
+	if ch := os.Getenv("PIGEON_RESTART_CHANNEL"); ch != "" {
+		b.session.ChannelMessageSend(ch, "-# ✅ 재시작 완료")
+		os.Unsetenv("PIGEON_RESTART_CHANNEL")
+	}
+
 	// Handle SIGHUP for config reload
 	sighup := make(chan os.Signal, 1)
 	signal.Notify(sighup, syscall.SIGHUP)
