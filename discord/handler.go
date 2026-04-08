@@ -361,24 +361,36 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 
-			// Release PID lock before exit (os.Exit skips defers)
+			// Release PID lock before exit
 			home, _ := os.UserHomeDir()
 			os.Remove(filepath.Join(home, ".pigeon-claw", "pigeon-claw.pid"))
 
-			// Find the actual binary (resolve symlinks for brew)
+			// Find binary and resolve symlinks (brew uses symlinks)
 			exe, err := exec.LookPath("pigeon-claw")
 			if err != nil {
-				exe, err = os.Executable()
+				exe, _ = os.Executable()
 			}
+			resolved, err := filepath.EvalSymlinks(exe)
 			if err != nil {
-				slog.Error("cannot find binary for restart", "error", err)
-				return
+				resolved = exe
 			}
+
+			slog.Info("restarting", "binary", resolved)
 
 			// Pass restart channel so new process can send completion message
 			env := os.Environ()
 			env = append(env, "PIGEON_RESTART_CHANNEL="+m.ChannelID)
-			syscall.Exec(exe, []string{exe, "serve"}, env)
+
+			if err := syscall.Exec(resolved, []string{resolved, "serve"}, env); err != nil {
+				slog.Error("syscall.Exec failed, falling back to cmd.Start", "error", err)
+				// Fallback: start new process and exit
+				cmd := exec.Command(resolved, "serve")
+				cmd.Env = env
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Start()
+				os.Exit(0)
+			}
 		}()
 		return true
 
