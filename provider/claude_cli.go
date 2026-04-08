@@ -72,6 +72,10 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 	}
 
 	cmd := exec.CommandContext(ctx, claudeBin, args...)
+	// Fix working directory so Claude CLI always finds its sessions
+	// in the same project path (~/.claude/projects/-Users-{user}/)
+	home, _ := os.UserHomeDir()
+	cmd.Dir = home
 	return c.executeCmd(ctx, cmd, onStatus)
 }
 
