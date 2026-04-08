@@ -29,10 +29,14 @@ type HandleResult struct {
 
 // DebugInfo holds diagnostic info for the !debug command.
 type DebugInfo struct {
-	LastError    string
-	LastErrorAt  time.Time
-	LastProvider string
-	ChannelID    string
+	LastError      string
+	LastErrorAt    time.Time
+	LastProvider   string
+	ChannelID      string
+	LastRequestAt  time.Time
+	LastRequestMsg string
+	LastCompleteAt time.Time
+	LastTokens     int
 }
 
 type Router struct {
@@ -88,6 +92,9 @@ func (r *Router) HandleWithAttachments(ctx context.Context, channelID, content s
 	systemPrompt := r.promptBuilder.Build()
 	toolDefs := tools.Definitions()
 
+	// Track request start
+	r.trackRequest(channelID, content)
+
 	// Determine provider order: if session has an active provider, try it first
 	providers := r.orderedProviders(sess.GetActiveProvider())
 
@@ -103,6 +110,7 @@ func (r *Router) HandleWithAttachments(ctx context.Context, channelID, content s
 
 		result.IsFallback = i > 0
 		sess.SetActiveProvider(p.Name())
+		r.trackComplete(channelID, result.TotalTokens)
 		return result
 	}
 
@@ -273,11 +281,41 @@ func (r *Router) GetSessions() *session.Store {
 func (r *Router) setDebug(channelID, providerName string, err error) {
 	r.debugMu.Lock()
 	defer r.debugMu.Unlock()
-	r.debugInfo[channelID] = &DebugInfo{
-		LastError:    err.Error(),
-		LastErrorAt:  time.Now(),
-		LastProvider: providerName,
-		ChannelID:    channelID,
+	if d, ok := r.debugInfo[channelID]; ok {
+		d.LastError = err.Error()
+		d.LastErrorAt = time.Now()
+		d.LastProvider = providerName
+	} else {
+		r.debugInfo[channelID] = &DebugInfo{
+			LastError:    err.Error(),
+			LastErrorAt:  time.Now(),
+			LastProvider: providerName,
+			ChannelID:    channelID,
+		}
+	}
+}
+
+func (r *Router) trackRequest(channelID, content string) {
+	r.debugMu.Lock()
+	defer r.debugMu.Unlock()
+	d, ok := r.debugInfo[channelID]
+	if !ok {
+		d = &DebugInfo{ChannelID: channelID}
+		r.debugInfo[channelID] = d
+	}
+	d.LastRequestAt = time.Now()
+	d.LastRequestMsg = content
+	if len(d.LastRequestMsg) > 100 {
+		d.LastRequestMsg = d.LastRequestMsg[:100] + "..."
+	}
+}
+
+func (r *Router) trackComplete(channelID string, tokens int) {
+	r.debugMu.Lock()
+	defer r.debugMu.Unlock()
+	if d, ok := r.debugInfo[channelID]; ok {
+		d.LastCompleteAt = time.Now()
+		d.LastTokens = tokens
 	}
 }
 

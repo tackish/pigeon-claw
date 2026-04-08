@@ -46,6 +46,12 @@ func (s *Store) GetOrCreate(channelID string) *Session {
 		return v.(*Session)
 	}
 
+	// Try loading from disk before creating empty session
+	if sess := s.loadFromDisk(channelID); sess != nil {
+		actual, _ := s.sessions.LoadOrStore(channelID, sess)
+		return actual.(*Session)
+	}
+
 	sess := &Session{
 		ChannelID:   channelID,
 		Messages:    make([]provider.Message, 0),
@@ -54,6 +60,25 @@ func (s *Store) GetOrCreate(channelID string) *Session {
 	}
 	actual, _ := s.sessions.LoadOrStore(channelID, sess)
 	return actual.(*Session)
+}
+
+func (s *Store) loadFromDisk(channelID string) *Session {
+	path := filepath.Join(s.sessionDir, fmt.Sprintf("channel_%s.json", channelID))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var sess Session
+	if err := json.Unmarshal(data, &sess); err != nil {
+		slog.Warn("failed to parse session file", "channel", channelID, "error", err)
+		return nil
+	}
+
+	sess.maxMessages = s.maxMessages
+	sess.sessionDir = s.sessionDir
+	slog.Info("loaded session from disk", "channel", channelID, "messages", len(sess.Messages), "cli_session_id", sess.CLISessionID)
+	return &sess
 }
 
 func (s *Store) Reset(channelID string) {
@@ -169,9 +194,11 @@ func (sess *Session) save() {
 func (s *Store) loadAll() {
 	entries, err := os.ReadDir(s.sessionDir)
 	if err != nil {
+		slog.Warn("failed to read session directory", "path", s.sessionDir, "error", err)
 		return
 	}
 
+	restored := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "channel_") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -192,6 +219,13 @@ func (s *Store) loadAll() {
 		sess.maxMessages = s.maxMessages
 		sess.sessionDir = s.sessionDir
 		s.sessions.Store(sess.ChannelID, &sess)
-		slog.Debug("restored session", "channel", sess.ChannelID, "messages", len(sess.Messages))
+		restored++
+		slog.Info("restored session",
+			"channel", sess.ChannelID,
+			"messages", len(sess.Messages),
+			"cli_session_id", sess.CLISessionID,
+			"provider", sess.ActiveProvider,
+		)
 	}
+	slog.Info("session restore complete", "total", restored)
 }

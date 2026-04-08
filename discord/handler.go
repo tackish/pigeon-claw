@@ -427,12 +427,26 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		}
 
 		if debug != nil {
-			sb.WriteString(fmt.Sprintf("\n**Last Error**\n"))
-			sb.WriteString(fmt.Sprintf("- Provider: `%s`\n", debug.LastProvider))
-			sb.WriteString(fmt.Sprintf("- Time: %s\n", debug.LastErrorAt.Format("2006-01-02 15:04:05")))
-			sb.WriteString(fmt.Sprintf("- Error:\n```\n%s\n```\n", debug.LastError))
+			if !debug.LastRequestAt.IsZero() {
+				sb.WriteString(fmt.Sprintf("\n**Last Request**\n"))
+				sb.WriteString(fmt.Sprintf("- Time: %s\n", debug.LastRequestAt.Format("2006-01-02 15:04:05")))
+				sb.WriteString(fmt.Sprintf("- Message: `%s`\n", debug.LastRequestMsg))
+				if !debug.LastCompleteAt.IsZero() {
+					elapsed := debug.LastCompleteAt.Sub(debug.LastRequestAt).Truncate(time.Second)
+					sb.WriteString(fmt.Sprintf("- Completed: %s (%s, %d tokens)\n", debug.LastCompleteAt.Format("15:04:05"), elapsed, debug.LastTokens))
+				} else {
+					elapsed := time.Since(debug.LastRequestAt).Truncate(time.Second)
+					sb.WriteString(fmt.Sprintf("- Status: **처리 중** (%s 경과)\n", elapsed))
+				}
+			}
+			if debug.LastError != "" {
+				sb.WriteString(fmt.Sprintf("\n**Last Error**\n"))
+				sb.WriteString(fmt.Sprintf("- Provider: `%s`\n", debug.LastProvider))
+				sb.WriteString(fmt.Sprintf("- Time: %s\n", debug.LastErrorAt.Format("2006-01-02 15:04:05")))
+				sb.WriteString(fmt.Sprintf("- Error:\n```\n%s\n```\n", debug.LastError))
+			}
 		} else {
-			sb.WriteString("\n*No errors recorded for this channel.*\n")
+			sb.WriteString("\n*No activity recorded for this channel.*\n")
 		}
 
 		s.ChannelMessageSend(m.ChannelID, sb.String())
