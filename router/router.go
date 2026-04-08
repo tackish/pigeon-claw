@@ -160,7 +160,7 @@ func (r *Router) tryProvider(
 	toolsUsed := 0
 
 	for iteration := 0; iteration < r.maxIterations; iteration++ {
-		ctx, cancel := context.WithTimeout(ctx, r.timeout)
+		ctx, cancel := r.withTimeout(ctx)
 		resp, err := p.SendWithStatus(ctx, systemPrompt, messages, toolDefs, onStatus)
 		cancel()
 
@@ -266,6 +266,14 @@ func (r *Router) orderedProviders(activeProvider string) []provider.Provider {
 	return r.providers
 }
 
+// withTimeout wraps context with timeout. If timeout is 0, returns parent ctx as-is (no timeout).
+func (r *Router) withTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	if r.timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, r.timeout)
+}
+
 func (r *Router) UpdateProviders(providers []provider.Provider) {
 	r.providers = providers
 }
@@ -304,6 +312,8 @@ func (r *Router) trackRequest(channelID, content string) {
 		r.debugInfo[channelID] = d
 	}
 	d.LastRequestAt = time.Now()
+	d.LastCompleteAt = time.Time{} // Reset so debug shows "처리 중" until complete
+	d.LastTokens = 0
 	d.LastRequestMsg = content
 	if len(d.LastRequestMsg) > 100 {
 		d.LastRequestMsg = d.LastRequestMsg[:100] + "..."
@@ -369,21 +379,20 @@ func (r *Router) trySessionAwareProvider(
 
 	slog.Info("session-aware call", "provider", p.Name(), "session_id", sessionID, "resume", resume)
 
-	ctx, cancel := context.WithTimeout(parentCtx, r.timeout)
+	ctx, cancel := r.withTimeout(parentCtx)
 	defer cancel()
 
 	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, toolDefs, sessionID, resume, onStatus)
-	if err != nil && resume {
-		// Resume failed — CLI session expired or lost.
+	if err != nil && resume && ctx.Err() == nil {
+		// Resume failed (but NOT timeout) — session expired or lost.
 		// Retry as new session with conversation history as context.
 		slog.Warn("resume failed, retrying with conversation history", "error", err)
 		sessionID = generateSessionID()
 		sess.SetCLISessionID(sessionID)
 
-		// Build context from JSON history so LLM doesn't lose conversation
 		contextMsg := buildContextMessage(history)
 
-		ctx2, cancel2 := context.WithTimeout(parentCtx, r.timeout)
+		ctx2, cancel2 := r.withTimeout(parentCtx)
 		defer cancel2()
 		resp, err = sa.SendWithSession(ctx2, systemPrompt, contextMsg, toolDefs, sessionID, false, onStatus)
 	}

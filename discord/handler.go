@@ -182,6 +182,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	startTime := time.Now()
 	var statusMsgID string
 	var lastStatus string
+	var lastActivity time.Time
 	var statusMu sync.Mutex
 
 	// Create initial status message
@@ -190,10 +191,11 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		statusMsgID = initMsg.ID
 	}
 
-	// Periodic elapsed time updater
+	// Periodic elapsed time updater + idle alert
 	statusDone := make(chan struct{})
+	idleAlerted := false
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -205,6 +207,18 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 				text := fmt.Sprintf("-# ⏳ %s 경과", elapsed)
 				if lastStatus != "" {
 					text += fmt.Sprintf(" | %s", lastStatus)
+				}
+				if !lastActivity.IsZero() {
+					idle := time.Since(lastActivity).Truncate(time.Second)
+					if idle > 30*time.Second {
+						text += fmt.Sprintf(" | 응답 대기 %s", idle)
+					}
+					// 5분 무응답 시 알림 (1회만)
+					if idle > 5*time.Minute && !idleAlerted {
+						idleAlerted = true
+						s.ChannelMessageSend(m.ChannelID,
+							fmt.Sprintf("-# ⚠ %s 동안 응답 없음. `!cancel`로 취소할 수 있습니다.", idle))
+					}
 				}
 				if statusMsgID != "" {
 					s.ChannelMessageEdit(m.ChannelID, statusMsgID, text)
@@ -218,6 +232,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		statusMu.Lock()
 		defer statusMu.Unlock()
 		lastStatus = status
+		lastActivity = time.Now()
 		elapsed := time.Since(startTime).Truncate(time.Second)
 		text := fmt.Sprintf("-# ⏳ %s 경과 | %s", elapsed, status)
 		if statusMsgID != "" {

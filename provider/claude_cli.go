@@ -143,7 +143,7 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 		switch event.Type {
 		case "assistant":
 			if onStatus != nil {
-				onStatus("thinking...")
+				onStatus("💭 thinking...")
 			}
 		case "tool_use":
 			if onStatus != nil && event.Tool.Name != "" {
@@ -151,7 +151,12 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			}
 		case "tool_result":
 			if onStatus != nil {
-				onStatus("processing result...")
+				onStatus("⚙ processing result...")
+			}
+		case "content_block_delta":
+			// Text streaming — CLI is actively generating
+			if onStatus != nil {
+				onStatus("✍ writing...")
 			}
 		case "result":
 			finalText.WriteString(event.ResultText)
