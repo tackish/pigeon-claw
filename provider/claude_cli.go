@@ -173,11 +173,17 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			Type    string `json:"type"`
 			Content string `json:"content"`
 			Message struct {
-				Content string `json:"content"`
+				Content []struct {
+					Type  string `json:"type"`
+					Text  string `json:"text"`
+					Name  string `json:"name"`
+					Input json.RawMessage `json:"input"`
+				} `json:"content"`
+				StopReason *string `json:"stop_reason"`
 			} `json:"message"`
-			Tool struct {
-				Name string `json:"name"`
-			} `json:"tool"`
+			ToolUseResult struct {
+				Content string `json:"content"`
+			} `json:"tool_use_result"`
 			Usage struct {
 				InputTokens  int `json:"input_tokens"`
 				OutputTokens int `json:"output_tokens"`
@@ -192,21 +198,40 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 
 		switch event.Type {
 		case "assistant":
+			// Parse tool_use from message.content array
 			if onStatus != nil {
-				onStatus("💭 thinking...")
+				reported := false
+				for _, block := range event.Message.Content {
+					if block.Type == "tool_use" && block.Name != "" {
+						// Extract short description from input
+						var input map[string]interface{}
+						json.Unmarshal(block.Input, &input)
+						detail := block.Name
+						if cmd, ok := input["command"].(string); ok {
+							if len(cmd) > 60 {
+								cmd = cmd[:60] + "..."
+							}
+							detail += ": " + cmd
+						} else if pattern, ok := input["pattern"].(string); ok {
+							detail += ": " + pattern
+						} else if path, ok := input["file_path"].(string); ok {
+							detail += ": " + path
+						}
+						onStatus(fmt.Sprintf("🔧 %s", detail))
+						reported = true
+					} else if block.Type == "text" && block.Text != "" {
+						onStatus("✍ writing...")
+						reported = true
+					}
+				}
+				if !reported {
+					onStatus("💭 thinking...")
+				}
 			}
-		case "tool_use":
-			if onStatus != nil && event.Tool.Name != "" {
-				onStatus(fmt.Sprintf("🔧 %s", event.Tool.Name))
-			}
-		case "tool_result":
+		case "user":
+			// Tool result returned
 			if onStatus != nil {
-				onStatus("⚙ processing result...")
-			}
-		case "content_block_delta":
-			// Text streaming — CLI is actively generating
-			if onStatus != nil {
-				onStatus("✍ writing...")
+				onStatus("⚙ tool 완료, 다음 단계...")
 			}
 		case "result":
 			finalText.WriteString(event.ResultText)
