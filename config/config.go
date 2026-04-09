@@ -124,10 +124,8 @@ func loadEnvFile(path string) {
 		}
 		key = strings.TrimSpace(key)
 		val = strings.TrimSpace(val)
-		// Don't override existing env vars
-		if os.Getenv(key) == "" {
-			os.Setenv(key, val)
-		}
+		// Config file always wins over existing env vars
+		os.Setenv(key, val)
 	}
 }
 

@@ -62,16 +62,18 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadCustomValues(t *testing.T) {
-	os.Setenv("DISCORD_TOKEN", "test-token")
-	os.Setenv("PROVIDER_PRIORITY", "ollama,claude")
-	os.Setenv("MAX_SESSION_MESSAGES", "100")
-	os.Setenv("ALLOWED_CHANNELS", "ch1,ch2,ch3")
-	defer func() {
-		os.Unsetenv("DISCORD_TOKEN")
-		os.Unsetenv("PROVIDER_PRIORITY")
-		os.Unsetenv("MAX_SESSION_MESSAGES")
-		os.Unsetenv("ALLOWED_CHANNELS")
-	}()
+	clearConfigEnv()
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Write a config file with custom values
+	configDir := tmpHome + "/.pigeon-claw"
+	os.MkdirAll(configDir, 0755)
+	os.WriteFile(configDir+"/config", []byte(
+		"DISCORD_TOKEN=test-token\nPROVIDER_PRIORITY=ollama,claude\nMAX_SESSION_MESSAGES=100\nALLOWED_CHANNELS=ch1,ch2,ch3\n",
+	), 0644)
 
 	cfg, err := Load()
 	if err != nil {
@@ -105,11 +107,11 @@ func TestLoadEnvFile(t *testing.T) {
 		t.Fatalf("expected 'works', got '%s'", v)
 	}
 
-	// Should not override existing
+	// Config file should override existing env vars
 	os.Setenv("TEST_LOAD_ENV", "original")
 	loadEnvFile(envFile)
-	if v := os.Getenv("TEST_LOAD_ENV"); v != "original" {
-		t.Fatalf("expected 'original', got '%s'", v)
+	if v := os.Getenv("TEST_LOAD_ENV"); v != "works" {
+		t.Fatalf("expected config file to override, got '%s'", v)
 	}
 
 	os.Unsetenv("TEST_LOAD_ENV")
