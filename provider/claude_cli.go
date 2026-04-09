@@ -157,6 +157,10 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 		return nil, fmt.Errorf("start claude cli: %w", err)
 	}
 
+	if onStatus != nil {
+		onStatus(fmt.Sprintf("🚀 CLI started (PID %d)", cmd.Process.Pid))
+	}
+
 	var finalText strings.Builder
 	var totalInput, totalOutput int
 

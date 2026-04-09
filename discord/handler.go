@@ -129,8 +129,9 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	// Per-channel concurrency: use a buffered channel as a non-blocking lock
-	semI, _ := h.channelLocks.LoadOrStore(m.ChannelID, make(chan struct{}, 1))
+	// Per-channel concurrency: allow up to 2 concurrent requests
+	// (so user can chat while a long task is running)
+	semI, _ := h.channelLocks.LoadOrStore(m.ChannelID, make(chan struct{}, 2))
 	sem := semI.(chan struct{})
 
 	select {
@@ -182,6 +183,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	startTime := time.Now()
 	var statusMsgID string
 	var lastStatus string
+	var cliPID string
 	var lastActivity time.Time
 	var statusMu sync.Mutex
 
@@ -205,15 +207,17 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 				statusMu.Lock()
 				elapsed := time.Since(startTime).Truncate(time.Second)
 				text := fmt.Sprintf("-# ⏳ %s 경과", elapsed)
+				if cliPID != "" {
+					text += fmt.Sprintf(" | %s", cliPID)
+				}
 				if lastStatus != "" {
-					text += fmt.Sprintf(" | %s", lastStatus)
+					text += fmt.Sprintf("\n-# %s", lastStatus)
 				}
 				if !lastActivity.IsZero() {
 					idle := time.Since(lastActivity).Truncate(time.Second)
 					if idle > 30*time.Second {
 						text += fmt.Sprintf(" | 응답 대기 %s", idle)
 					}
-					// 5분 무응답 시 알림 (1회만)
 					if idle > 5*time.Minute && !idleAlerted {
 						idleAlerted = true
 						s.ChannelMessageSend(m.ChannelID,
@@ -231,10 +235,21 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	onStatus := func(status string) {
 		statusMu.Lock()
 		defer statusMu.Unlock()
+
+		// Capture PID from CLI start event
+		if strings.HasPrefix(status, "🚀 CLI started") {
+			cliPID = status
+			return
+		}
+
 		lastStatus = status
 		lastActivity = time.Now()
 		elapsed := time.Since(startTime).Truncate(time.Second)
-		text := fmt.Sprintf("-# ⏳ %s 경과 | %s", elapsed, status)
+		text := fmt.Sprintf("-# ⏳ %s 경과", elapsed)
+		if cliPID != "" {
+			text += fmt.Sprintf(" | %s", cliPID)
+		}
+		text += fmt.Sprintf("\n-# %s", status)
 		if statusMsgID != "" {
 			s.ChannelMessageEdit(m.ChannelID, statusMsgID, text)
 		}
