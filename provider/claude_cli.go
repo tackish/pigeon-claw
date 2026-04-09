@@ -47,22 +47,65 @@ func detectClaudeModel() string {
 func (c *ClaudeCLI) Name() string          { return "claude-cli" }
 func (c *ClaudeCLI) Model() string         { return c.model }
 func (c *ClaudeCLI) SetModel(model string) { c.model = model }
-func (c *ClaudeCLI) SupportsImages() bool  { return false }
+func (c *ClaudeCLI) SupportsImages() bool  { return true }
 
 func (c *ClaudeCLI) Send(ctx context.Context, systemPrompt string, messages []Message, tools []Tool) (*Response, error) {
 	return c.SendWithStatus(ctx, systemPrompt, messages, tools, nil)
 }
 
-func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, message string, tools []Tool, sessionID string, resume bool, onStatus StatusCallback) (*Response, error) {
+func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, message string, images []ContentPart, tools []Tool, sessionID string, resume bool, onStatus StatusCallback) (*Response, error) {
 	claudeBin := findClaudeBin()
 
+	// Save image attachments to temp files and prepend paths to the message
+	// Claude CLI can read images via its Read tool (multimodal)
+	var tmpFiles []string
+	for i, img := range images {
+		if img.Type != ContentImage || len(img.ImageData) == 0 {
+			continue
+		}
+		ext := ".png"
+		switch img.MimeType {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/gif":
+			ext = ".gif"
+		case "image/webp":
+			ext = ".webp"
+		}
+		tmpFile, err := os.CreateTemp("", fmt.Sprintf("pigeon-img-%d-*%s", i, ext))
+		if err != nil {
+			continue
+		}
+		if _, err := tmpFile.Write(img.ImageData); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			continue
+		}
+		tmpFile.Close()
+		tmpFiles = append(tmpFiles, tmpFile.Name())
+	}
+
+	// Prepend image file paths to the message so Claude CLI reads them
+	finalMessage := message
+	if len(tmpFiles) > 0 {
+		var sb strings.Builder
+		sb.WriteString("[첨부된 이미지 파일 — Read 도구로 확인하세요]\n")
+		for _, f := range tmpFiles {
+			sb.WriteString(fmt.Sprintf("- %s\n", f))
+		}
+		sb.WriteString("\n")
+		sb.WriteString(message)
+		finalMessage = sb.String()
+	}
+
 	args := []string{
-		"-p", message,
+		"-p", finalMessage,
 		"--model", c.model,
 		"--dangerously-skip-permissions",
 		"--output-format", "stream-json",
 		"--verbose",
 	}
+
 	if resume {
 		// Resume existing session: --resume <session-id>
 		args = append(args, "--resume", sessionID)
@@ -76,7 +119,14 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 	// in the same project path (~/.claude/projects/-Users-{user}/)
 	home, _ := os.UserHomeDir()
 	cmd.Dir = home
-	return c.executeCmd(ctx, cmd, onStatus)
+	resp, err := c.executeCmd(ctx, cmd, onStatus)
+
+	// Cleanup temp image files after CLI is done
+	for _, f := range tmpFiles {
+		os.Remove(f)
+	}
+
+	return resp, err
 }
 
 func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onStatus StatusCallback) (*Response, error) {

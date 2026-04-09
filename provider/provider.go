@@ -80,5 +80,5 @@ type Provider interface {
 // When implemented, the router will pass session IDs to avoid resending
 // full conversation history on every turn.
 type SessionAware interface {
-	SendWithSession(ctx context.Context, systemPrompt string, message string, tools []Tool, sessionID string, resume bool, onStatus StatusCallback) (*Response, error)
+	SendWithSession(ctx context.Context, systemPrompt string, message string, images []ContentPart, tools []Tool, sessionID string, resume bool, onStatus StatusCallback) (*Response, error)
 }

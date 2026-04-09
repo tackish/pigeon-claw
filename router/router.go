@@ -377,12 +377,20 @@ func (r *Router) trySessionAwareProvider(
 	}
 	lastMsg := history[len(history)-1]
 
-	slog.Info("session-aware call", "provider", p.Name(), "session_id", sessionID, "resume", resume)
+	// Extract image parts from the last message
+	var imageParts []provider.ContentPart
+	for _, part := range lastMsg.Parts {
+		if part.Type == provider.ContentImage && len(part.ImageData) > 0 {
+			imageParts = append(imageParts, part)
+		}
+	}
+
+	slog.Info("session-aware call", "provider", p.Name(), "session_id", sessionID, "resume", resume, "images", len(imageParts))
 
 	ctx, cancel := r.withTimeout(parentCtx)
 	defer cancel()
 
-	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, toolDefs, sessionID, resume, onStatus)
+	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, imageParts, toolDefs, sessionID, resume, onStatus)
 	if err != nil && resume && ctx.Err() == nil {
 		// Resume failed (but NOT timeout) — session expired or lost.
 		// Retry as new session with conversation history as context.
@@ -394,7 +402,7 @@ func (r *Router) trySessionAwareProvider(
 
 		ctx2, cancel2 := r.withTimeout(parentCtx)
 		defer cancel2()
-		resp, err = sa.SendWithSession(ctx2, systemPrompt, contextMsg, toolDefs, sessionID, false, onStatus)
+		resp, err = sa.SendWithSession(ctx2, systemPrompt, contextMsg, imageParts, toolDefs, sessionID, false, onStatus)
 	}
 	if err != nil {
 		sess.SetCLISessionID("")
