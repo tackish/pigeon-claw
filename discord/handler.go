@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -184,7 +185,8 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	var statusMsgID string
 	var idleAlertID string
 	var lastStatus string
-	var cliPID string
+	var cliPID string // display string, e.g. "🚀 CLI started (PID 2762)"
+	var cliPIDNum int  // numeric PID for pgrep/kill
 	var lastActivity time.Time
 	var toolRunning bool // true while a Bash/Read/Edit tool is executing
 	var statusMu sync.Mutex
@@ -231,10 +233,29 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 					}
 					if idle > autoCancelIdle && !idleAlerted {
 						idleAlerted = true
-						msg := fmt.Sprintf(
-							"-# ⚠ %s 동안 응답 없음 — CLI 세션을 종료합니다. "+
-								"자식 프로세스는 살아있어요. "+
-								"`ls -lt ~/.pigeon-claw/jobs/` 또는 `ps aux | grep <명령어>` 로 확인하세요.", idle)
+						// Snapshot live descendants before killing the CLI.
+						// claude-cli was started with Setpgid, so its pgid
+						// equals its PID and pgrep -g catches grandchildren
+						// (bash -> ffmpeg, etc.). Processes orphaned to
+						// init earlier still share the pgid.
+						procs := snapshotCLIChildren(cliPIDNum)
+						var msg string
+						if len(procs) > 0 {
+							var sb strings.Builder
+							fmt.Fprintf(&sb,
+								"-# ⏱ %s 동안 응답 없음 — CLI 세션 종료. "+
+									"아래 프로세스는 계속 실행됩니다 (PID로 확인하세요):\n```\n", idle)
+							for _, p := range procs {
+								sb.WriteString(p)
+								sb.WriteByte('\n')
+							}
+							sb.WriteString("```")
+							msg = sb.String()
+						} else {
+							msg = fmt.Sprintf(
+								"-# ⏱ %s 동안 응답 없음 — CLI 세션 종료. "+
+									"남아있는 자식 프로세스 없음.", idle)
+						}
 						alertMsg, _ := s.ChannelMessageSend(m.ChannelID, msg)
 						if alertMsg != nil {
 							idleAlertID = alertMsg.ID
@@ -254,9 +275,18 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		statusMu.Lock()
 		defer statusMu.Unlock()
 
-		// Capture PID from CLI start event
+		// Capture PID from CLI start event, e.g. "🚀 CLI started (PID 2762)"
 		if strings.HasPrefix(status, "🚀 CLI started") {
 			cliPID = status
+			if open := strings.Index(status, "PID "); open != -1 {
+				rest := status[open+4:]
+				if close := strings.IndexByte(rest, ')'); close != -1 {
+					rest = rest[:close]
+				}
+				if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
+					cliPIDNum = n
+				}
+			}
 			return
 		}
 
@@ -640,6 +670,44 @@ func splitMessage(text string, maxLen int) []string {
 	}
 
 	return chunks
+}
+
+// snapshotCLIChildren returns a list of "PID  elapsed  command" lines for
+// every process still alive in the claude-cli's process group, excluding
+// the CLI itself. claude-cli is started with Setpgid=true, so its pgid
+// equals its PID; pgrep -g catches children AND grandchildren (e.g., a
+// bash -c wrapper's ffmpeg child), plus any backgrounded siblings that
+// were launched earlier in the same request.
+func snapshotCLIChildren(cliPID int) []string {
+	if cliPID <= 0 {
+		return nil
+	}
+	out, err := exec.Command("pgrep", "-g", strconv.Itoa(cliPID)).Output()
+	if err != nil {
+		return nil
+	}
+
+	var lines []string
+	selfStr := strconv.Itoa(cliPID)
+	for _, pidStr := range strings.Fields(string(out)) {
+		if pidStr == selfStr {
+			continue // skip claude-cli itself — it's about to be killed
+		}
+		psOut, err := exec.Command("ps", "-p", pidStr, "-o", "pid=,etime=,command=").Output()
+		if err != nil {
+			continue
+		}
+		line := strings.TrimSpace(string(psOut))
+		if line == "" {
+			continue
+		}
+		// Trim very long command lines so they fit in Discord code blocks.
+		if len(line) > 140 {
+			line = line[:137] + "..."
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 func (h *Handler) startTyping(ctx context.Context, s *discordgo.Session, channelID string) func() {
