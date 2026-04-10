@@ -167,8 +167,8 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		slog.Warn("failed to add reaction", "emoji", "👀", "error", err)
 	}
 
-	// Start typing indicator
-	stopTyping := h.startTyping(s, m.ChannelID)
+	// Start typing indicator (stops when ctx is cancelled or request completes)
+	stopTyping := h.startTyping(ctx, s, m.ChannelID)
 	defer stopTyping()
 
 	// Build message with attachments
@@ -266,6 +266,14 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 
 	// Remove processing emoji
 	s.MessageReactionRemove(m.ChannelID, m.ID, "👀", s.State.User.ID)
+
+	// If the request was cancelled (!cancel), discard any result that came
+	// back afterwards. Typing indicator is stopped via defer + ctx.Done().
+	if ctx.Err() != nil {
+		slog.Info("request cancelled, discarding result", "channel", m.ChannelID)
+		s.MessageReactionAdd(m.ChannelID, m.ID, "🛑")
+		return
+	}
 
 	// Error case: send error message with 🔄 for retry
 	if result.Error {
@@ -593,8 +601,10 @@ func splitMessage(text string, maxLen int) []string {
 	return chunks
 }
 
-func (h *Handler) startTyping(s *discordgo.Session, channelID string) func() {
+func (h *Handler) startTyping(ctx context.Context, s *discordgo.Session, channelID string) func() {
 	done := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(done) }) }
 	go func() {
 		s.ChannelTyping(channelID)
 		ticker := time.NewTicker(typingInterval)
@@ -603,12 +613,14 @@ func (h *Handler) startTyping(s *discordgo.Session, channelID string) func() {
 			select {
 			case <-done:
 				return
+			case <-ctx.Done():
+				return
 			case <-ticker.C:
 				s.ChannelTyping(channelID)
 			}
 		}
 	}()
-	return func() { close(done) }
+	return stop
 }
 
 func (h *Handler) OnReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAdd) {
