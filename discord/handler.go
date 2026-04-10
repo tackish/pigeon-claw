@@ -202,7 +202,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	// SysProcAttr puts it in its own pgid), so child processes like
 	// ffmpeg/python keep running, orphaned to init. The user can then
 	// check on them via PID in a follow-up message.
-	const autoCancelIdle = 1 * time.Minute
+	const autoCancelIdle = 5 * time.Minute
 
 	// Periodic elapsed time updater + idle alert
 	statusDone := make(chan struct{})
@@ -231,7 +231,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 					} else if idle > 20*time.Second {
 						text += fmt.Sprintf(" | CLI 응답 대기 %s", idle)
 					}
-					if idle > autoCancelIdle && !idleAlerted {
+					if idle > autoCancelIdle && !idleAlerted && !toolRunning {
 						idleAlerted = true
 						// Snapshot live descendants before killing the CLI.
 						// claude-cli was started with Setpgid, so its pgid
