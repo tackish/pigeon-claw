@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 )
 
 type ClaudeCLI struct {
@@ -145,6 +146,13 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 }
 
 func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus StatusCallback) (*Response, error) {
+	// Put claude-cli in its own process group so we can kill JUST it on
+	// timeout without reaping legitimate long-running child processes
+	// (ffmpeg, python scripts, etc.) that it spawned. They become
+	// orphans and get re-parented to init — still alive for the user
+	// to check on later via PID.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
@@ -157,8 +165,22 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 		return nil, fmt.Errorf("start claude cli: %w", err)
 	}
 
+	cliPID := cmd.Process.Pid
+
+	// When ctx is cancelled, send SIGTERM to ONLY the claude-cli process
+	// (not the whole process group). Children stay alive.
+	ctxDone := make(chan struct{})
+	defer close(ctxDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = syscall.Kill(cliPID, syscall.SIGTERM)
+		case <-ctxDone:
+		}
+	}()
+
 	if onStatus != nil {
-		onStatus(fmt.Sprintf("🚀 CLI started (PID %d)", cmd.Process.Pid))
+		onStatus(fmt.Sprintf("🚀 CLI started (PID %d)", cliPID))
 	}
 
 	var finalText strings.Builder
@@ -221,7 +243,9 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 						} else if path, ok := input["file_path"].(string); ok {
 							detail += ": " + path
 						}
-						onStatus(fmt.Sprintf("🔧 %s", detail))
+						// Prefix with TOOL_START: so handler knows a tool is running
+						// and can pause idle-timeout checks.
+						onStatus(fmt.Sprintf("TOOL_START:🔧 %s", detail))
 						reported = true
 					} else if block.Type == "text" && block.Text != "" {
 						onStatus("✍ writing...")
@@ -233,9 +257,9 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 				}
 			}
 		case "user":
-			// Tool result returned
+			// Tool result returned — signal handler to resume idle checks.
 			if onStatus != nil {
-				onStatus("⚙ tool 완료, 다음 단계...")
+				onStatus("TOOL_END:⚙ tool 완료, 다음 단계...")
 			}
 		case "result":
 			finalText.WriteString(event.ResultText)

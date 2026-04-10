@@ -129,9 +129,9 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	// Per-channel concurrency: allow up to 2 concurrent requests
-	// (so user can chat while a long task is running)
-	semI, _ := h.channelLocks.LoadOrStore(m.ChannelID, make(chan struct{}, 2))
+	// Per-channel concurrency: 1 request at a time.
+	// If the user wants to interrupt, they can use !cancel.
+	semI, _ := h.channelLocks.LoadOrStore(m.ChannelID, make(chan struct{}, 1))
 	sem := semI.(chan struct{})
 
 	select {
@@ -182,9 +182,11 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 
 	startTime := time.Now()
 	var statusMsgID string
+	var idleAlertID string
 	var lastStatus string
 	var cliPID string
 	var lastActivity time.Time
+	var toolRunning bool // true while a Bash/Read/Edit tool is executing
 	var statusMu sync.Mutex
 
 	// Create initial status message
@@ -192,6 +194,13 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	if err == nil {
 		statusMsgID = initMsg.ID
 	}
+
+	// Auto-cancel if any tool produces no new stream-json event within
+	// this window. We terminate ONLY the claude-cli process (its
+	// SysProcAttr puts it in its own pgid), so child processes like
+	// ffmpeg/python keep running, orphaned to init. The user can then
+	// check on them via PID in a follow-up message.
+	const autoCancelIdle = 1 * time.Minute
 
 	// Periodic elapsed time updater + idle alert
 	statusDone := make(chan struct{})
@@ -215,13 +224,22 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 				}
 				if !lastActivity.IsZero() {
 					idle := time.Since(lastActivity).Truncate(time.Second)
-					if idle > 30*time.Second {
-						text += fmt.Sprintf(" | 응답 대기 %s", idle)
+					if toolRunning {
+						text += fmt.Sprintf(" | tool 실행 중 %s", idle)
+					} else if idle > 20*time.Second {
+						text += fmt.Sprintf(" | CLI 응답 대기 %s", idle)
 					}
-					if idle > 5*time.Minute && !idleAlerted {
+					if idle > autoCancelIdle && !idleAlerted {
 						idleAlerted = true
-						s.ChannelMessageSend(m.ChannelID,
-							fmt.Sprintf("-# ⚠ %s 동안 응답 없음. `!cancel`로 취소할 수 있습니다.", idle))
+						msg := fmt.Sprintf(
+							"-# ⚠ %s 동안 응답 없음 — CLI 세션을 종료합니다. "+
+								"자식 프로세스는 살아있어요. "+
+								"`ls -lt ~/.pigeon-claw/jobs/` 또는 `ps aux | grep <명령어>` 로 확인하세요.", idle)
+						alertMsg, _ := s.ChannelMessageSend(m.ChannelID, msg)
+						if alertMsg != nil {
+							idleAlertID = alertMsg.ID
+						}
+						cancel()
 					}
 				}
 				if statusMsgID != "" {
@@ -242,6 +260,15 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 			return
 		}
 
+		// Tool lifecycle markers from claude-cli provider
+		if strings.HasPrefix(status, "TOOL_START:") {
+			toolRunning = true
+			status = strings.TrimPrefix(status, "TOOL_START:")
+		} else if strings.HasPrefix(status, "TOOL_END:") {
+			toolRunning = false
+			status = strings.TrimPrefix(status, "TOOL_END:")
+		}
+
 		lastStatus = status
 		lastActivity = time.Now()
 		elapsed := time.Since(startTime).Truncate(time.Second)
@@ -258,20 +285,34 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	// Route to LLM
 	result := h.router.HandleWithAttachments(ctx, m.ChannelID, m.Content, attachments, onStatus)
 
-	// Stop elapsed time updater and clean up status message
+	// Stop elapsed time updater and clean up status messages
 	close(statusDone)
+	statusMu.Lock()
+	wasIdleCancelled := idleAlerted
 	if statusMsgID != "" {
 		s.ChannelMessageDelete(m.ChannelID, statusMsgID)
 	}
+	// Keep idleAlertID on screen if that's how we got here — it has the
+	// instructions for checking on orphaned processes. Delete it only
+	// if the request completed normally.
+	if idleAlertID != "" && !wasIdleCancelled {
+		s.ChannelMessageDelete(m.ChannelID, idleAlertID)
+	}
+	statusMu.Unlock()
 
 	// Remove processing emoji
 	s.MessageReactionRemove(m.ChannelID, m.ID, "👀", s.State.User.ID)
 
-	// If the request was cancelled (!cancel), discard any result that came
-	// back afterwards. Typing indicator is stopped via defer + ctx.Done().
+	// If the request was cancelled (!cancel or idle timeout), discard any
+	// result that came back afterwards.
 	if ctx.Err() != nil {
-		slog.Info("request cancelled, discarding result", "channel", m.ChannelID)
-		s.MessageReactionAdd(m.ChannelID, m.ID, "🛑")
+		if wasIdleCancelled {
+			slog.Warn("request auto-cancelled due to idle timeout", "channel", m.ChannelID)
+			s.MessageReactionAdd(m.ChannelID, m.ID, "⏱")
+		} else {
+			slog.Info("request cancelled by user", "channel", m.ChannelID)
+			s.MessageReactionAdd(m.ChannelID, m.ID, "🛑")
+		}
 		return
 	}
 
