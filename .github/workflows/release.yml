@@ -82,9 +82,10 @@ jobs:
           AMD_SHA=$(sha256sum dist/pigeon-claw-darwin-amd64.tar.gz | awk '{print $1}')
           VERSION=${{ steps.version.outputs.version }}
 
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/pigeon-claw.rb
-          sed -i "/arm64/{n;s/.*sha256.*/      sha256 \"${ARM_SHA}\"/;}" Formula/pigeon-claw.rb
-          sed -i "/amd64/{n;s/.*sha256.*/      sha256 \"${AMD_SHA}\"/;}" Formula/pigeon-claw.rb
+          # BSD sed (macOS) requires empty string after -i
+          sed -i '' "s/version \".*\"/version \"${VERSION}\"/" Formula/pigeon-claw.rb
+          sed -i '' "/arm64/{n;s/.*sha256.*/      sha256 \"${ARM_SHA}\"/;}" Formula/pigeon-claw.rb
+          sed -i '' "/amd64/{n;s/.*sha256.*/      sha256 \"${AMD_SHA}\"/;}" Formula/pigeon-claw.rb
 
           git config user.name "Tek"
           git config user.email "tackish@nate.com"
