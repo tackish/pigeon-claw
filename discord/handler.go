@@ -183,10 +183,8 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 
 	startTime := time.Now()
 	var statusMsgID string
-	var idleAlertID string
 	var lastStatus string
 	var cliPID string // display string, e.g. "🚀 CLI started (PID 2762)"
-	var cliPIDNum int  // numeric PID for pgrep/kill
 	var lastActivity time.Time
 	var toolRunning bool // true while a Bash/Read/Edit tool is executing
 	var statusMu sync.Mutex
@@ -197,16 +195,8 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		statusMsgID = initMsg.ID
 	}
 
-	// Auto-cancel if any tool produces no new stream-json event within
-	// this window. We terminate ONLY the claude-cli process (its
-	// SysProcAttr puts it in its own pgid), so child processes like
-	// ffmpeg/python keep running, orphaned to init. The user can then
-	// check on them via PID in a follow-up message.
-	const autoCancelIdle = 5 * time.Minute
-
-	// Periodic elapsed time updater + idle alert
+	// Periodic elapsed time updater
 	statusDone := make(chan struct{})
-	idleAlerted := false
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -231,37 +221,6 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 					} else if idle > 20*time.Second {
 						text += fmt.Sprintf(" | CLI 응답 대기 %s", idle)
 					}
-					if idle > autoCancelIdle && !idleAlerted && !toolRunning {
-						idleAlerted = true
-						// Snapshot live descendants before killing the CLI.
-						// claude-cli was started with Setpgid, so its pgid
-						// equals its PID and pgrep -g catches grandchildren
-						// (bash -> ffmpeg, etc.). Processes orphaned to
-						// init earlier still share the pgid.
-						procs := snapshotCLIChildren(cliPIDNum)
-						var msg string
-						if len(procs) > 0 {
-							var sb strings.Builder
-							fmt.Fprintf(&sb,
-								"-# ⏱ %s 동안 응답 없음 — CLI 세션 종료. "+
-									"아래 프로세스는 계속 실행됩니다 (PID로 확인하세요):\n```\n", idle)
-							for _, p := range procs {
-								sb.WriteString(p)
-								sb.WriteByte('\n')
-							}
-							sb.WriteString("```")
-							msg = sb.String()
-						} else {
-							msg = fmt.Sprintf(
-								"-# ⏱ %s 동안 응답 없음 — CLI 세션 종료. "+
-									"남아있는 자식 프로세스 없음.", idle)
-						}
-						alertMsg, _ := s.ChannelMessageSend(m.ChannelID, msg)
-						if alertMsg != nil {
-							idleAlertID = alertMsg.ID
-						}
-						cancel()
-					}
 				}
 				if statusMsgID != "" {
 					s.ChannelMessageEdit(m.ChannelID, statusMsgID, text)
@@ -278,15 +237,6 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		// Capture PID from CLI start event, e.g. "🚀 CLI started (PID 2762)"
 		if strings.HasPrefix(status, "🚀 CLI started") {
 			cliPID = status
-			if open := strings.Index(status, "PID "); open != -1 {
-				rest := status[open+4:]
-				if close := strings.IndexByte(rest, ')'); close != -1 {
-					rest = rest[:close]
-				}
-				if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
-					cliPIDNum = n
-				}
-			}
 			return
 		}
 
@@ -318,15 +268,8 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	// Stop elapsed time updater and clean up status messages
 	close(statusDone)
 	statusMu.Lock()
-	wasIdleCancelled := idleAlerted
 	if statusMsgID != "" {
 		s.ChannelMessageDelete(m.ChannelID, statusMsgID)
-	}
-	// Keep idleAlertID on screen if that's how we got here — it has the
-	// instructions for checking on orphaned processes. Delete it only
-	// if the request completed normally.
-	if idleAlertID != "" && !wasIdleCancelled {
-		s.ChannelMessageDelete(m.ChannelID, idleAlertID)
 	}
 	statusMu.Unlock()
 
@@ -336,13 +279,8 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	// If the request was cancelled (!cancel or idle timeout), discard any
 	// result that came back afterwards.
 	if ctx.Err() != nil {
-		if wasIdleCancelled {
-			slog.Warn("request auto-cancelled due to idle timeout", "channel", m.ChannelID)
-			s.MessageReactionAdd(m.ChannelID, m.ID, "⏱")
-		} else {
-			slog.Info("request cancelled by user", "channel", m.ChannelID)
-			s.MessageReactionAdd(m.ChannelID, m.ID, "🛑")
-		}
+		slog.Info("request cancelled by user", "channel", m.ChannelID)
+		s.MessageReactionAdd(m.ChannelID, m.ID, "🛑")
 		return
 	}
 
