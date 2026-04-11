@@ -81,8 +81,24 @@ func findLatestRecording(dir string) (string, error) {
 }
 
 // obsClickButton clicks a button in OBS main window via AppleScript.
+// Activates OBS first and searches all windows for one containing the button,
+// so it works even if OBS was minimized or in another space.
 func obsClickButton(buttonName string) error {
-	script := fmt.Sprintf(`tell application "System Events" to tell process "OBS" to click button "%s" of window 1`, buttonName)
+	script := fmt.Sprintf(`
+tell application "OBS" to activate
+delay 0.2
+tell application "System Events"
+	tell process "OBS"
+		set frontmost to true
+		repeat with w in windows
+			try
+				click button "%s" of w
+				return "ok"
+			end try
+		end repeat
+		error "button '%s' not found in any OBS window"
+	end tell
+end tell`, buttonName, buttonName)
 	cmd := exec.Command("osascript", "-e", script)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
