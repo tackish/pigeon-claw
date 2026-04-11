@@ -43,15 +43,16 @@ type retryInfo struct {
 }
 
 type Handler struct {
-	router          *router.Router
-	channelLocks    sync.Map // map[channelID]*sync.Mutex
-	retryMessages   sync.Map // map[messageID]*retryInfo
-	activeRequests  sync.Map // map[channelID]string — content being processed
-	cancelFuncs     sync.Map // map[channelID]context.CancelFunc
-	mu              sync.RWMutex
-	allowedChannels map[string]bool
-	mentionChannels map[string]bool
-	msgs            i18n.Messages
+	router            *router.Router
+	channelLocks      sync.Map // map[channelID]*sync.Mutex
+	retryMessages     sync.Map // map[messageID]*retryInfo
+	activeRequests    sync.Map // map[channelID]string — content being processed
+	cancelFuncs       sync.Map // map[channelID]context.CancelFunc
+	recordingNames    sync.Map // map[channelID]string — name for current recording
+	mu                sync.RWMutex
+	allowedChannels   map[string]bool
+	mentionChannels   map[string]bool
+	msgs              i18n.Messages
 }
 
 func (h *Handler) UpdateAllowedChannels(channels []string) {
@@ -398,12 +399,19 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		s.ChannelMessageSend(m.ChannelID, h.msgs.Help)
 		return true
 
-	case content == "!recording":
-		if err := obsClickButton("Start Recording"); err != nil {
+	case content == "!recording" || strings.HasPrefix(content, "!recording "):
+		nameArg := strings.TrimSpace(strings.TrimPrefix(content, "!recording"))
+		if err := obsStartRecording(); err != nil {
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# ❌ OBS 녹화 시작 실패: %s", err))
 			return true
 		}
-		s.ChannelMessageSend(m.ChannelID, "-# 🔴 OBS 녹화 시작")
+		if nameArg != "" {
+			h.recordingNames.Store(m.ChannelID, nameArg)
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# 🔴 OBS 녹화 시작: `%s`", nameArg))
+		} else {
+			h.recordingNames.Delete(m.ChannelID)
+			s.ChannelMessageSend(m.ChannelID, "-# 🔴 OBS 녹화 시작")
+		}
 		return true
 
 	case content == "!stop-recording" || strings.HasPrefix(content, "!stop-recording "):
@@ -759,8 +767,30 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "debug", Description: "Show last error, session ID, debug info"},
 	{Name: "model", Description: "List or change provider models"},
 	{Name: "provider", Description: "Show provider priority order"},
-	{Name: "recording", Description: "Start OBS recording"},
-	{Name: "stop-recording", Description: "Stop OBS recording (will ask for folder name)"},
+	{
+		Name:        "recording",
+		Description: "Start OBS recording",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "name",
+				Description: "File name (without extension)",
+				Required:    false,
+			},
+		},
+	},
+	{
+		Name:        "stop-recording",
+		Description: "Stop OBS recording and optionally move to a folder",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "folder",
+				Description: "Subfolder under OBS recording directory",
+				Required:    false,
+			},
+		},
+	},
 }
 
 func (h *Handler) RegisterSlashCommands(s *discordgo.Session) {
@@ -809,11 +839,20 @@ func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		userID = i.User.ID
 	}
 
-	// Create a fake MessageCreate so we can reuse handleBuiltinCommand
+	// Build command content: "!name" + first string option (if any)
+	cmdData := i.ApplicationCommandData()
+	commandText := "!" + cmdData.Name
+	for _, opt := range cmdData.Options {
+		if opt.Type == discordgo.ApplicationCommandOptionString && opt.StringValue() != "" {
+			commandText += " " + opt.StringValue()
+			break // only the first string arg
+		}
+	}
+
 	fake := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
 			ChannelID: i.ChannelID,
-			Content:   "!" + i.ApplicationCommandData().Name,
+			Content:   commandText,
 			Author:    &discordgo.User{ID: userID},
 		},
 	}
