@@ -398,6 +398,19 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		s.ChannelMessageSend(m.ChannelID, h.msgs.Help)
 		return true
 
+	case content == "!recording":
+		if err := obsClickButton("Start Recording"); err != nil {
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# ❌ OBS 녹화 시작 실패: %s", err))
+			return true
+		}
+		s.ChannelMessageSend(m.ChannelID, "-# 🔴 OBS 녹화 시작")
+		return true
+
+	case content == "!stop-recording" || strings.HasPrefix(content, "!stop-recording "):
+		folderArg := strings.TrimSpace(strings.TrimPrefix(content, "!stop-recording"))
+		h.handleStopRecording(s, m.ChannelID, folderArg)
+		return true
+
 	case content == "!reset":
 		h.router.GetSessions().Reset(m.ChannelID)
 		s.ChannelMessageSend(m.ChannelID, h.msgs.SessionReset)
@@ -749,6 +762,8 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "debug", Description: "Show last error, session ID, debug info"},
 	{Name: "model", Description: "List or change provider models"},
 	{Name: "provider", Description: "Show provider priority order"},
+	{Name: "recording", Description: "Start OBS recording"},
+	{Name: "stop-recording", Description: "Stop OBS recording (will ask for folder name)"},
 }
 
 func (h *Handler) RegisterSlashCommands(s *discordgo.Session) {
