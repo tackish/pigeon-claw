@@ -788,6 +788,19 @@ func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		return
 	}
 
+	// Acknowledge interaction immediately (Discord requires response within 3s).
+	// Use ephemeral deferred response so nothing visible shows up — the
+	// actual command output is sent via ChannelMessageSend.
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags: discordgo.MessageFlagsEphemeral,
+		},
+	})
+	if err != nil {
+		slog.Warn("interaction ack failed", "error", err)
+	}
+
 	// Resolve user from guild member or DM user
 	var userID string
 	if i.Member != nil {
@@ -808,8 +821,6 @@ func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 	// Run the command (sends response via ChannelMessageSend)
 	h.handleBuiltinCommand(s, fake)
 
-	// Acknowledge the interaction silently to prevent "interaction failed"
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredMessageUpdate,
-	})
+	// Delete the deferred ephemeral response
+	s.InteractionResponseDelete(i.Interaction)
 }
