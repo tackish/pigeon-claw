@@ -83,7 +83,12 @@ func findLatestRecording(dir string) (string, error) {
 // obsClickButton clicks a button in OBS main window via AppleScript.
 func obsClickButton(buttonName string) error {
 	script := fmt.Sprintf(`tell application "System Events" to tell process "OBS" to click button "%s" of window 1`, buttonName)
-	return exec.Command("osascript", "-e", script).Run()
+	cmd := exec.Command("osascript", "-e", script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // handleStopRecording stops OBS recording and moves the file to the target

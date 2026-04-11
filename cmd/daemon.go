@@ -35,11 +35,24 @@ func runDaemon(action string) {
 }
 
 func daemonStart(plistPath string) {
+	// Regenerate plist if it references a version-pinned brew Cellar path.
+	// This ensures upgrades don't leave the daemon pointing at a stale binary.
+	if data, err := os.ReadFile(plistPath); err == nil {
+		if strings.Contains(string(data), "/Cellar/pigeon-claw/") {
+			fmt.Println("detected version-pinned plist, regenerating with symlink path...")
+			exec.Command("launchctl", "unload", plistPath).Run()
+			os.Remove(plistPath)
+		}
+	}
+
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
-		// Auto-generate plist
-		binaryPath, _ := os.Executable()
+		// Auto-generate plist.
+		// Prefer the PATH-resolved symlink (e.g. /opt/homebrew/bin/pigeon-claw)
+		// so brew upgrades automatically propagate to the daemon on next launch,
+		// without needing to regenerate the plist.
+		binaryPath, _ := exec.LookPath("pigeon-claw")
 		if binaryPath == "" {
-			binaryPath, _ = exec.LookPath("pigeon-claw")
+			binaryPath, _ = os.Executable()
 		}
 		if binaryPath == "" {
 			fmt.Fprintf(os.Stderr, "cannot find pigeon-claw binary path\n")

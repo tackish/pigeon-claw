@@ -13,7 +13,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # macos runner needed for codesign (preserves TCC/Accessibility
+    # permissions across upgrades when signed with a stable identifier)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,16 +43,22 @@ jobs:
           echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
           echo "Next version: v${VERSION}"
 
-      - name: Build binaries
+      - name: Build and sign binaries
         run: |
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p dist
 
+          # ad-hoc codesign with stable identifier so macOS TCC (Accessibility,
+          # Full Disk Access, etc.) recognizes upgraded binaries as the same app
+          # and preserves granted permissions across versions.
+
           GOOS=darwin GOARCH=arm64 go build -ldflags "-X github.com/tackish/pigeon-claw/cmd.version=${VERSION}" -o dist/pigeon-claw .
+          codesign --force --sign - --identifier com.pigeon-claw dist/pigeon-claw
           tar -czf dist/pigeon-claw-darwin-arm64.tar.gz -C dist pigeon-claw
           rm dist/pigeon-claw
 
           GOOS=darwin GOARCH=amd64 go build -ldflags "-X github.com/tackish/pigeon-claw/cmd.version=${VERSION}" -o dist/pigeon-claw .
+          codesign --force --sign - --identifier com.pigeon-claw dist/pigeon-claw
           tar -czf dist/pigeon-claw-darwin-amd64.tar.gz -C dist pigeon-claw
           rm dist/pigeon-claw
 

@@ -50,9 +50,15 @@ func checkUpdate() {
 		fmt.Printf("\n  ⬆ New version available: %s → %s\n", current, latest)
 		fmt.Println()
 
-		// Ask user with 10-second timeout (auto-skip for daemon mode)
-		answer := promptWithTimeout("  Update now? [Y/n] (auto-update in 10s): ", 10*time.Second)
+		// If not running in a terminal (e.g., launchd daemon), skip the prompt
+		// and auto-update immediately.
+		if !isTerminal(os.Stdin) {
+			slog.Info("non-interactive environment, auto-updating")
+			runBrewUpdate()
+			return
+		}
 
+		answer := promptWithTimeout("  Update now? [Y/n] (auto-update in 10s): ", 10*time.Second)
 		switch strings.ToLower(strings.TrimSpace(answer)) {
 		case "", "y", "yes":
 			runBrewUpdate()
@@ -61,6 +67,15 @@ func checkUpdate() {
 			fmt.Println()
 		}
 	}
+}
+
+// isTerminal reports whether the given file is a terminal (tty).
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // isNewer compares semver strings (e.g., "0.0.10" > "0.0.6")
@@ -127,7 +142,7 @@ func runBrewUpdate() {
 	home, _ := os.UserHomeDir()
 	os.Remove(home + "/.pigeon-claw/pigeon-claw.pid")
 
-	// Find the new binary (resolve brew symlinks)
+	// Use the symlink path (not resolved) so we always run the upgraded binary.
 	exe, err := exec.LookPath("pigeon-claw")
 	if err != nil {
 		exe, _ = os.Executable()

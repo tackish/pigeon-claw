@@ -425,26 +425,23 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 			home, _ := os.UserHomeDir()
 			os.Remove(filepath.Join(home, ".pigeon-claw", "pigeon-claw.pid"))
 
-			// Find binary and resolve symlinks (brew uses symlinks)
+			// Use symlink path (e.g. /opt/homebrew/bin/pigeon-claw) directly.
+			// Do NOT resolve symlinks — we want to always run the currently-linked
+			// version, so brew upgrades take effect on restart.
 			exe, err := exec.LookPath("pigeon-claw")
 			if err != nil {
 				exe, _ = os.Executable()
 			}
-			resolved, err := filepath.EvalSymlinks(exe)
-			if err != nil {
-				resolved = exe
-			}
 
-			slog.Info("restarting", "binary", resolved)
+			slog.Info("restarting", "binary", exe)
 
 			// Pass restart channel so new process can send completion message
 			env := os.Environ()
 			env = append(env, "PIGEON_RESTART_CHANNEL="+m.ChannelID)
 
-			if err := syscall.Exec(resolved, []string{resolved, "serve"}, env); err != nil {
+			if err := syscall.Exec(exe, []string{exe, "serve"}, env); err != nil {
 				slog.Error("syscall.Exec failed, falling back to cmd.Start", "error", err)
-				// Fallback: start new process and exit
-				cmd := exec.Command(resolved, "serve")
+				cmd := exec.Command(exe, "serve")
 				cmd.Env = env
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
