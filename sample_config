@@ -10,6 +10,12 @@ DISCORD_TOKEN=
 PROVIDER_PRIORITY=claude-cli,ollama
 
 # Claude CLI (no API key needed, authenticate with: claude login)
+# Model used by claude-cli. Use a FULL model name, not an alias like "fable"
+# (aliases are rejected by the CLI). Defaults to claude-fable-5, falling back
+# to claude-opus-4-8 when the primary is unavailable/overloaded.
+# CLAUDE_CLI_MODEL=claude-fable-5
+# CLAUDE_CLI_FALLBACK_MODEL=claude-opus-4-8
+
 # ANTHROPIC_MODEL=claude-sonnet-4-20250514
 
 # API Providers (optional)

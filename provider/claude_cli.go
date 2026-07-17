@@ -12,15 +12,16 @@ import (
 )
 
 type ClaudeCLI struct {
-	model string
+	model    string
+	fallback string
 }
 
-func NewClaudeCLI(model string) *ClaudeCLI {
+func NewClaudeCLI(model, fallback string) *ClaudeCLI {
 	if model == "" {
 		// Detect default model from claude CLI
 		model = detectClaudeModel()
 	}
-	return &ClaudeCLI{model: model}
+	return &ClaudeCLI{model: model, fallback: fallback}
 }
 
 func detectClaudeModel() string {
@@ -106,6 +107,9 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 		"--output-format", "stream-json",
 		"--verbose",
 	}
+	if c.fallback != "" {
+		args = append(args, "--fallback-model", c.fallback)
+	}
 
 	if resume {
 		// Resume existing session: --resume <session-id>
@@ -134,13 +138,18 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 	prompt := c.buildPrompt(systemPrompt, messages)
 	claudeBin := findClaudeBin()
 
-	cmd := exec.CommandContext(ctx, claudeBin,
+	args := []string{
 		"-p", prompt,
 		"--model", c.model,
 		"--dangerously-skip-permissions",
 		"--output-format", "stream-json",
 		"--verbose",
-	)
+	}
+	if c.fallback != "" {
+		args = append(args, "--fallback-model", c.fallback)
+	}
+
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
 
 	return c.executeCmd(ctx, cmd, onStatus)
 }

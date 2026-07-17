@@ -16,6 +16,8 @@ type Config struct {
 	GeminiAPIKey       string
 	OllamaHost         string
 	OllamaModel        string
+	ClaudeCLIModel     string
+	ClaudeCLIFallback  string
 	AnthropicModel     string
 	OpenAIModel        string
 	GeminiModel        string
@@ -48,7 +50,9 @@ func Load() (*Config, error) {
 		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
 		GeminiAPIKey:    os.Getenv("GEMINI_API_KEY"),
 		OllamaHost:      envOrDefault("OLLAMA_HOST", "http://localhost:11434"),
-		OllamaModel:     envOrDefault("OLLAMA_MODEL", "llama3"),
+		OllamaModel:       envOrDefault("OLLAMA_MODEL", "llama3"),
+		ClaudeCLIModel:    envOrDefault("CLAUDE_CLI_MODEL", "claude-fable-5"),
+		ClaudeCLIFallback: envOrDefault("CLAUDE_CLI_FALLBACK_MODEL", "claude-opus-4-8"),
 		AnthropicModel:  envOrDefault("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
 		OpenAIModel:     envOrDefault("OPENAI_MODEL", "gpt-4o"),
 		GeminiModel:     envOrDefault("GEMINI_MODEL", "gemini-2.0-flash"),
