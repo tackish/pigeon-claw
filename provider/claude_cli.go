@@ -5,15 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 type ClaudeCLI struct {
 	model    string
 	fallback string
+
+	steerMu  sync.Mutex
+	steering map[string]*steerSession // sessionID → live run accepting stdin input
 }
 
 func NewClaudeCLI(model, fallback string) *ClaudeCLI {
@@ -21,7 +26,101 @@ func NewClaudeCLI(model, fallback string) *ClaudeCLI {
 		// Detect default model from claude CLI
 		model = detectClaudeModel()
 	}
-	return &ClaudeCLI{model: model, fallback: fallback}
+	return &ClaudeCLI{model: model, fallback: fallback, steering: make(map[string]*steerSession)}
+}
+
+// steerSession tracks a live CLI run started with --input-format
+// stream-json, whose stdin stays open so additional user messages can
+// be injected while it works. pending counts user turns whose result
+// event hasn't arrived yet; when it reaches zero stdin is closed and
+// the CLI exits.
+type steerSession struct {
+	mu      sync.Mutex
+	stdin   io.WriteCloser
+	pending int
+	closed  bool
+}
+
+// writeUserMessage writes one stream-json user message line. Callers
+// must hold ss.mu.
+func (ss *steerSession) writeUserMessage(text string) error {
+	payload := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": text}},
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = ss.stdin.Write(append(b, '\n'))
+	return err
+}
+
+// steer injects an extra user message into the running CLI. Returns
+// false if the run already finished or is shutting down.
+func (ss *steerSession) steer(text string) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.closed {
+		return false
+	}
+	if err := ss.writeUserMessage(text); err != nil {
+		return false
+	}
+	ss.pending++
+	return true
+}
+
+// turnDone marks one user turn as completed. Closes stdin when no
+// turns remain so the CLI exits.
+func (ss *steerSession) turnDone() {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.pending--
+	if ss.pending <= 0 && !ss.closed {
+		ss.closed = true
+		ss.stdin.Close()
+	}
+}
+
+// shutdown closes stdin unconditionally (process ended or errored).
+func (ss *steerSession) shutdown() {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if !ss.closed {
+		ss.closed = true
+		ss.stdin.Close()
+	}
+}
+
+func (c *ClaudeCLI) registerSteer(sessionID string, ss *steerSession) {
+	c.steerMu.Lock()
+	c.steering[sessionID] = ss
+	c.steerMu.Unlock()
+}
+
+func (c *ClaudeCLI) unregisterSteer(sessionID string, ss *steerSession) {
+	c.steerMu.Lock()
+	if c.steering[sessionID] == ss {
+		delete(c.steering, sessionID)
+	}
+	c.steerMu.Unlock()
+	ss.shutdown()
+}
+
+// Steer implements provider.Steerable: delivers an additional user
+// message to the live run for sessionID, if one exists.
+func (c *ClaudeCLI) Steer(sessionID, message string) bool {
+	c.steerMu.Lock()
+	ss := c.steering[sessionID]
+	c.steerMu.Unlock()
+	if ss == nil {
+		return false
+	}
+	return ss.steer(message)
 }
 
 func detectClaudeModel() string {
@@ -100,10 +199,14 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 		finalMessage = sb.String()
 	}
 
+	// stream-json input mode: the prompt goes through stdin instead of
+	// argv, and stdin stays open so follow-up messages can be steered
+	// into the run while it works (see Steer).
 	args := []string{
-		"-p", finalMessage,
+		"-p",
 		"--model", c.model,
 		"--dangerously-skip-permissions",
+		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 	}
@@ -124,7 +227,25 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 	// in the same project path (~/.claude/projects/-Users-{user}/)
 	home, _ := os.UserHomeDir()
 	cmd.Dir = home
-	resp, err := c.executeCmd(ctx, cmd, onStatus)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	ss := &steerSession{stdin: stdin, pending: 1}
+	c.registerSteer(sessionID, ss)
+	defer c.unregisterSteer(sessionID, ss)
+
+	// Write the first message asynchronously — a large message (e.g.
+	// rebuilt conversation history) could exceed the pipe buffer and
+	// block until the CLI starts reading.
+	go func() {
+		ss.mu.Lock()
+		defer ss.mu.Unlock()
+		ss.writeUserMessage(finalMessage)
+	}()
+
+	resp, err := c.executeCmd(ctx, cmd, onStatus, ss)
 
 	// Cleanup temp image files after CLI is done
 	for _, f := range tmpFiles {
@@ -151,10 +272,14 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 
 	cmd := exec.CommandContext(ctx, claudeBin, args...)
 
-	return c.executeCmd(ctx, cmd, onStatus)
+	return c.executeCmd(ctx, cmd, onStatus, nil)
 }
 
-func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus StatusCallback) (*Response, error) {
+// executeCmd runs the CLI and streams its stream-json output. When ss
+// is non-nil the run accepts steered messages: each result event
+// completes one user turn and is pushed to the caller immediately via
+// a TURN_RESULT status; stdin closes once all pending turns finish.
+func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus StatusCallback, ss *steerSession) (*Response, error) {
 	// Put claude-cli in its own process group so we can kill JUST it on
 	// timeout without reaping legitimate long-running child processes
 	// (ffmpeg, python scripts, etc.) that it spawned. They become
@@ -271,9 +396,20 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 				onStatus("TOOL_END:⚙ tool 완료, 다음 단계...")
 			}
 		case "result":
+			// One user turn completed. Multiple result events arrive
+			// when messages were steered into the run.
+			if finalText.Len() > 0 {
+				finalText.WriteString("\n\n")
+			}
 			finalText.WriteString(event.ResultText)
-			totalInput = event.Usage.InputTokens
-			totalOutput = event.Usage.OutputTokens
+			totalInput += event.Usage.InputTokens
+			totalOutput += event.Usage.OutputTokens
+			if ss != nil {
+				if onStatus != nil {
+					onStatus("TURN_RESULT:" + event.ResultText)
+				}
+				ss.turnDone()
+			}
 		default:
 			if event.Content != "" {
 				finalText.WriteString(event.Content)

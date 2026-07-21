@@ -140,7 +140,14 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	case sem <- struct{}{}:
 		// Acquired the slot
 	default:
-		// Channel is busy — show what's being processed
+		// Channel is busy — steer the message into the running CLI
+		// session so the agent picks it up mid-task (text only; the
+		// steering path can't carry attachments).
+		if len(m.Attachments) == 0 && h.router.Steer(m.ChannelID, m.Content) {
+			s.MessageReactionAdd(m.ChannelID, m.ID, "➕")
+			return
+		}
+		// No live steerable run — show what's being processed
 		active, _ := h.activeRequests.Load(m.ChannelID)
 		preview := "..."
 		if str, ok := active.(string); ok && str != "" {
@@ -188,6 +195,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	var cliPID string // display string, e.g. "🚀 CLI started (PID 2762)"
 	var lastActivity time.Time
 	var toolRunning bool // true while a Bash/Read/Edit tool is executing
+	var streamedResults bool // true once turn results were sent via TURN_RESULT
 	var statusMu sync.Mutex
 
 	// Create initial status message
@@ -232,6 +240,21 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	}()
 
 	onStatus := func(status string) {
+		// A turn finished while the run continues (steered messages
+		// pending) — deliver its text to the channel right away.
+		if strings.HasPrefix(status, "TURN_RESULT:") {
+			text := strings.TrimPrefix(status, "TURN_RESULT:")
+			statusMu.Lock()
+			streamedResults = true
+			lastActivity = time.Now()
+			toolRunning = false
+			statusMu.Unlock()
+			if strings.TrimSpace(text) != "" {
+				h.sendLongMessage(s, m.ChannelID, text)
+			}
+			return
+		}
+
 		statusMu.Lock()
 		defer statusMu.Unlock()
 
@@ -312,8 +335,12 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		})
 	}
 
-	// Send text response
-	if result.Text != "" {
+	// Send text response — unless turn results were already streamed
+	// via TURN_RESULT (result.Text is their concatenation).
+	statusMu.Lock()
+	streamed := streamedResults
+	statusMu.Unlock()
+	if result.Text != "" && !streamed {
 		h.sendLongMessage(s, m.ChannelID, result.Text)
 	}
 
@@ -715,6 +742,11 @@ func (h *Handler) OnReactionAdd(s *discordgo.Session, r *discordgo.MessageReacti
 	// Status callback
 	var statusMsgID string
 	onStatus := func(status string) {
+		// Retry path sends the full response at the end — skip
+		// per-turn result streaming.
+		if strings.HasPrefix(status, "TURN_RESULT:") {
+			return
+		}
 		if statusMsgID == "" {
 			msg, err := s.ChannelMessageSend(r.ChannelID, fmt.Sprintf("-# %s", status))
 			if err == nil {

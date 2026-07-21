@@ -117,6 +117,30 @@ func (r *Router) HandleWithAttachments(ctx context.Context, channelID, content s
 	return &HandleResult{Error: true}
 }
 
+// Steer delivers an additional user message to a request already
+// running on this channel's CLI session (like typing to Claude Code
+// mid-task). Returns false when there is no live steerable run —
+// the caller should fall back to its busy handling.
+func (r *Router) Steer(channelID, content string) bool {
+	sess := r.sessions.GetOrCreate(channelID)
+	sessionID := sess.GetCLISessionID()
+	if sessionID == "" {
+		return false
+	}
+	for _, p := range r.providers {
+		st, ok := p.(provider.Steerable)
+		if !ok {
+			continue
+		}
+		if st.Steer(sessionID, content) {
+			sess.Append(provider.Message{Role: provider.RoleUser, Content: content})
+			slog.Info("steered message into running session", "channel", channelID, "session_id", sessionID)
+			return true
+		}
+	}
+	return false
+}
+
 func generateSessionID() string {
 	b := make([]byte, 16)
 	rand.Read(b)

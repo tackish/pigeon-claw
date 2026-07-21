@@ -82,3 +82,12 @@ type Provider interface {
 type SessionAware interface {
 	SendWithSession(ctx context.Context, systemPrompt string, message string, images []ContentPart, tools []Tool, sessionID string, resume bool, onStatus StatusCallback) (*Response, error)
 }
+
+// Steerable is an optional interface for providers that can inject
+// additional user messages into an already-running session request
+// (steering), the way Claude Code accepts new input mid-task.
+// Steer returns false when there is no live run for the session —
+// the caller should fall back to its busy handling.
+type Steerable interface {
+	Steer(sessionID string, message string) bool
+}
