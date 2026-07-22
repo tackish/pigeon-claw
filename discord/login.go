@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -24,8 +25,12 @@ import (
 //
 // os.Setenv makes it take effect immediately: the provider spawns claude with
 // exec.Command, which inherits the parent environment, so no restart is needed.
+//
+// The CLI gives visual feedback on a bad code ("OAuth error: ...", "Press
+// Enter to retry.") — we relay those lines to Discord and auto-press Enter so
+// the user can simply /code again with a fresh code.
 
-const loginTimeout = 5 * time.Minute
+const loginTimeout = 10 * time.Minute
 
 var (
 	// The canonical sign-in URL is embedded in an OSC-8 hyperlink escape
@@ -34,6 +39,10 @@ var (
 	osc8URLRe = regexp.MustCompile("\x1b\\]8;[^;]*;(https://[^\x1b\x07]+)")
 	// Long-lived OAuth tokens look like sk-ant-oat01-...
 	oatTokenRe = regexp.MustCompile(`sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]+`)
+	// Terminal escape stripper: OSC sequences, CSI sequences, lone escapes.
+	loginAnsiRe = regexp.MustCompile(`\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b\[[0-9;?>=]*[a-zA-Z]|\x1b[^\[\]]`)
+	// Lines worth relaying to Discord after a code submission.
+	loginFeedbackRe = regexp.MustCompile(`(?i)error|failed|invalid|expired|retry|denied|network`)
 )
 
 type loginFlow struct {
@@ -41,6 +50,11 @@ type loginFlow struct {
 	cmd       *exec.Cmd
 	channelID string
 	cancel    chan struct{}
+	logFile   *os.File
+
+	mu           sync.Mutex
+	raw          strings.Builder // full pty output for token/URL scanning
+	submitOffset int             // raw length when the last code was submitted; -1 = none pending
 }
 
 // handleLogin starts `claude setup-token` under a pty and begins relaying its
@@ -54,7 +68,8 @@ func (h *Handler) handleLogin(s *discordgo.Session, channelID string) {
 	}
 
 	cmd := exec.Command(provider.FindClaudeBin(), "setup-token")
-	if home, err := os.UserHomeDir(); err == nil {
+	home, err := os.UserHomeDir()
+	if err == nil {
 		cmd.Dir = home
 	}
 	ptmx, err := pty.Start(cmd)
@@ -66,7 +81,14 @@ func (h *Handler) handleLogin(s *discordgo.Session, channelID string) {
 	// A wide terminal keeps the URL and token on single lines (no wrapping).
 	_ = pty.Setsize(ptmx, &pty.Winsize{Rows: 50, Cols: 400})
 
-	fl := &loginFlow{ptmx: ptmx, cmd: cmd, channelID: channelID, cancel: make(chan struct{})}
+	fl := &loginFlow{ptmx: ptmx, cmd: cmd, channelID: channelID, cancel: make(chan struct{}), submitOffset: -1}
+	// Raw output log for post-mortem debugging (contains no secrets beyond
+	// the token we persist anyway; 0600 like the config file).
+	if home != "" {
+		if f, ferr := os.OpenFile(home+"/.pigeon-claw/login.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); ferr == nil {
+			fl.logFile = f
+		}
+	}
 	h.activeLogin = fl
 	h.loginMu.Unlock()
 
@@ -79,24 +101,30 @@ func (h *Handler) handleLogin(s *discordgo.Session, channelID string) {
 		case <-time.After(loginTimeout):
 			if h.claimLogin(fl) {
 				teardownLogin(fl)
-				s.ChannelMessageSend(fl.channelID, "-# ⌛ 로그인 시간 초과(5분)로 취소되었습니다. `/login` 으로 다시 시도하세요.")
+				s.ChannelMessageSend(fl.channelID, "-# ⌛ 로그인 시간 초과(10분)로 취소되었습니다. `/login` 으로 다시 시도하세요.")
 			}
 		case <-fl.cancel:
 		}
 	}()
 }
 
-// runLoginReader drains the pty, relaying the sign-in URL once and finishing
-// as soon as a token appears (or the process exits).
+// runLoginReader drains the pty: relays the sign-in URL once, relays CLI
+// feedback after each code submission, and finishes when a token appears.
 func (h *Handler) runLoginReader(s *discordgo.Session, fl *loginFlow) {
 	buf := make([]byte, 4096)
-	var acc strings.Builder
 	urlSent := false
 	for {
 		n, err := fl.ptmx.Read(buf)
 		if n > 0 {
-			acc.Write(buf[:n])
-			raw := acc.String()
+			if fl.logFile != nil {
+				fl.logFile.Write(buf[:n])
+			}
+			fl.mu.Lock()
+			fl.raw.Write(buf[:n])
+			raw := fl.raw.String()
+			offset := fl.submitOffset
+			fl.mu.Unlock()
+
 			if !urlSent {
 				if m := osc8URLRe.FindStringSubmatch(raw); m != nil {
 					urlSent = true
@@ -110,14 +138,31 @@ func (h *Handler) runLoginReader(s *discordgo.Session, fl *loginFlow) {
 				}
 				return
 			}
+			// After a code submission, watch for CLI feedback (errors etc.)
+			// in the output produced since that submission.
+			if offset >= 0 && offset <= len(raw) {
+				if feedback := extractLoginFeedback(raw[offset:]); feedback != "" {
+					fl.mu.Lock()
+					fl.submitOffset = -1 // one notification per submission
+					fl.mu.Unlock()
+					// Reset the "Press Enter to retry." prompt so the next
+					// /code lands on a fresh paste prompt.
+					fl.ptmx.Write([]byte("\r"))
+					s.ChannelMessageSend(fl.channelID, fmt.Sprintf(
+						"❌ 코드가 거부되었습니다:\n```%s```\n브라우저에서 **새 코드**를 발급받아 `/code <코드>` 로 다시 보내주세요. (URL 재사용 가능)", feedback))
+				}
+			}
 		}
 		if err != nil {
 			break
 		}
 	}
 
-	// Process ended without us catching a token mid-stream — final sweep.
-	if tok := oatTokenRe.FindString(acc.String()); tok != "" {
+	// Process ended without a token mid-stream — final sweep.
+	fl.mu.Lock()
+	raw := fl.raw.String()
+	fl.mu.Unlock()
+	if tok := oatTokenRe.FindString(raw); tok != "" {
 		if h.claimLogin(fl) {
 			h.completeLogin(s, fl, tok)
 		}
@@ -125,8 +170,32 @@ func (h *Handler) runLoginReader(s *discordgo.Session, fl *loginFlow) {
 	}
 	if h.claimLogin(fl) {
 		teardownLogin(fl)
-		s.ChannelMessageSend(fl.channelID, "-# ❌ 로그인이 완료되지 않았습니다. `/login` 으로 다시 시도하세요.")
+		s.ChannelMessageSend(fl.channelID, "-# ❌ 로그인이 완료되지 않았습니다. `/login` 으로 다시 시도하세요. (자세한 로그: ~/.pigeon-claw/login.log)")
 	}
+}
+
+// extractLoginFeedback strips terminal escapes from raw pty output and
+// returns error-ish visible lines (e.g. "OAuth error: ... status code 400"),
+// skipping spinner frames and the masked code echo.
+func extractLoginFeedback(raw string) string {
+	clean := loginAnsiRe.ReplaceAllString(raw, "")
+	clean = strings.ReplaceAll(clean, "\r", "\n")
+	var picked []string
+	seen := map[string]bool{}
+	for _, ln := range strings.Split(clean, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || seen[ln] || strings.Contains(ln, "***") {
+			continue
+		}
+		if loginFeedbackRe.MatchString(ln) && !strings.Contains(ln, "https://") {
+			seen[ln] = true
+			picked = append(picked, ln)
+			if len(picked) >= 3 {
+				break
+			}
+		}
+	}
+	return strings.Join(picked, "\n")
 }
 
 // handleLoginCode feeds the pasted authorization code into the waiting pty.
@@ -143,6 +212,9 @@ func (h *Handler) handleLoginCode(s *discordgo.Session, channelID, code string) 
 		s.ChannelMessageSend(channelID, "-# 사용법: `/code <코드>`")
 		return
 	}
+	fl.mu.Lock()
+	fl.submitOffset = fl.raw.Len()
+	fl.mu.Unlock()
 	if _, err := fl.ptmx.Write([]byte(code + "\r")); err != nil {
 		s.ChannelMessageSend(channelID, fmt.Sprintf("-# ❌ 코드 전송 실패: %s", err))
 		return
@@ -196,6 +268,9 @@ func teardownLogin(fl *loginFlow) {
 	}
 	if fl.cmd != nil && fl.cmd.Process != nil {
 		fl.cmd.Process.Kill()
+	}
+	if fl.logFile != nil {
+		fl.logFile.Close()
 	}
 }
 
