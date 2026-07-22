@@ -30,7 +30,8 @@ var langs = map[string]Messages{
 			"| `!status` | 현재 provider 및 메시지 수 |\n" +
 			"| `!debug` | 마지막 에러, 세션 정보 |\n" +
 			"| `!model` | 모델 목록 / 변경 |\n" +
-			"| `!provider` | provider 우선순위 |",
+			"| `!provider` | provider 우선순위 |\n" +
+			"| `!login` | Claude CLI 재인증 (URL 전송) |",
 	},
 	"japanese": {
 		SessionReset:       "セッションがリセットされました。",
@@ -48,7 +49,8 @@ var langs = map[string]Messages{
 			"| `!status` | ステータス確認 |\n" +
 			"| `!debug` | デバッグ情報 |\n" +
 			"| `!model` | モデル一覧/変更 |\n" +
-			"| `!provider` | プロバイダー一覧 |",
+			"| `!provider` | プロバイダー一覧 |\n" +
+			"| `!login` | Claude CLI 再認証 |",
 	},
 	"chinese": {
 		SessionReset:       "会话已重置。",
@@ -66,7 +68,8 @@ var langs = map[string]Messages{
 			"| `!status` | 状态信息 |\n" +
 			"| `!debug` | 调试信息 |\n" +
 			"| `!model` | 模型列表/更改 |\n" +
-			"| `!provider` | 提供商列表 |",
+			"| `!provider` | 提供商列表 |\n" +
+			"| `!login` | Claude CLI 重新认证 |",
 	},
 	"": defaultMessages,
 }
@@ -87,7 +90,8 @@ var defaultMessages = Messages{
 		"| `!status` | Show provider & message count |\n" +
 		"| `!debug` | Last error & session info |\n" +
 		"| `!model` | List/change models |\n" +
-		"| `!provider` | Show provider priority |",
+		"| `!provider` | Show provider priority |\n" +
+		"| `!login` | Re-authenticate Claude CLI |",
 }
 
 func Get(language string) Messages {

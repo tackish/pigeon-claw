@@ -442,6 +442,11 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 	}, nil
 }
 
+// FindClaudeBin returns the path to the claude CLI binary, checking common
+// install locations before falling back to PATH lookup. Exported so other
+// packages (e.g. the Discord login flow) can locate the same binary.
+func FindClaudeBin() string { return findClaudeBin() }
+
 func findClaudeBin() string {
 	home, _ := os.UserHomeDir()
 	paths := []string{

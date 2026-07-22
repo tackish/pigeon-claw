@@ -53,6 +53,9 @@ type Handler struct {
 	allowedChannels   map[string]bool
 	mentionChannels   map[string]bool
 	msgs              i18n.Messages
+
+	loginMu     sync.Mutex // guards activeLogin
+	activeLogin *loginFlow // in-progress claude setup-token flow, nil if none
 }
 
 func (h *Handler) UpdateAllowedChannels(channels []string) {
@@ -441,6 +444,18 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		}
 		return true
 
+	case content == "!login":
+		h.handleLogin(s, m.ChannelID)
+		return true
+
+	case strings.HasPrefix(content, "!code"):
+		h.handleLoginCode(s, m.ChannelID, strings.TrimSpace(strings.TrimPrefix(content, "!code")))
+		return true
+
+	case content == "!login-cancel":
+		h.handleLoginCancel(s, m.ChannelID)
+		return true
+
 	case content == "!stop-recording" || strings.HasPrefix(content, "!stop-recording "):
 		folderArg := strings.TrimSpace(strings.TrimPrefix(content, "!stop-recording"))
 		h.handleStopRecording(s, m.ChannelID, folderArg)
@@ -799,6 +814,20 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "debug", Description: "Show last error, session ID, debug info"},
 	{Name: "model", Description: "List or change provider models"},
 	{Name: "provider", Description: "Show provider priority order"},
+	{Name: "login", Description: "Re-authenticate claude CLI (sends OAuth URL here)"},
+	{
+		Name:        "code",
+		Description: "Submit the OAuth code from the login URL",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "code",
+				Description: "Authorization code from the browser",
+				Required:    true,
+			},
+		},
+	},
+	{Name: "login-cancel", Description: "Cancel an in-progress login"},
 	{
 		Name:        "recording",
 		Description: "Start OBS recording",
