@@ -51,8 +51,10 @@ func Load() (*Config, error) {
 		GeminiAPIKey:    os.Getenv("GEMINI_API_KEY"),
 		OllamaHost:      envOrDefault("OLLAMA_HOST", "http://localhost:11434"),
 		OllamaModel:       envOrDefault("OLLAMA_MODEL", "llama3"),
+		// Fallback uses the "opus" alias so the CLI always resolves it to
+		// the latest Opus-tier model without a code change per release.
 		ClaudeCLIModel:    envOrDefault("CLAUDE_CLI_MODEL", "claude-fable-5"),
-		ClaudeCLIFallback: envOrDefault("CLAUDE_CLI_FALLBACK_MODEL", "claude-opus-4-8"),
+		ClaudeCLIFallback: envOrDefault("CLAUDE_CLI_FALLBACK_MODEL", "opus"),
 		AnthropicModel:  envOrDefault("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
 		OpenAIModel:     envOrDefault("OPENAI_MODEL", "gpt-4o"),
 		GeminiModel:     envOrDefault("GEMINI_MODEL", "gemini-2.0-flash"),
