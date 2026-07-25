@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type ClaudeCLI struct {
@@ -31,15 +32,30 @@ func NewClaudeCLI(model, fallback string) *ClaudeCLI {
 
 // steerSession tracks a live CLI run started with --input-format
 // stream-json, whose stdin stays open so additional user messages can
-// be injected while it works. pending counts user turns whose result
-// event hasn't arrived yet; when it reaches zero stdin is closed and
-// the CLI exits.
+// be injected while it works.
+//
+// Written messages and result events don't map 1:1: a message steered
+// into a running turn may be merged into that turn and answered by its
+// single result event (verified against claude CLI 2.1.172), or queued
+// and answered by a turn of its own. So stdin closes immediately only
+// when results have caught up with writes; when a result arrives with
+// writes still ahead, the run may already be drained (merge) or about
+// to start another turn (queue) — indistinguishable here — and stdin
+// closes after steerDrainGrace unless new stream activity proves
+// another turn started.
 type steerSession struct {
-	mu      sync.Mutex
-	stdin   io.WriteCloser
-	pending int
-	closed  bool
+	mu         sync.Mutex
+	stdin      io.WriteCloser
+	writes     int // user messages written to stdin
+	results    int // result events seen
+	closed     bool
+	closeTimer *time.Timer // deferred close armed by turnResult, nil if none
 }
+
+// steerDrainGrace is how long after a result event stdin stays open
+// waiting for evidence that the CLI started another turn for a queued
+// steered message. Measured turn-start latency is ~3s.
+var steerDrainGrace = 10 * time.Second
 
 // writeUserMessage writes one stream-json user message line. Callers
 // must hold ss.mu.
@@ -70,30 +86,66 @@ func (ss *steerSession) steer(text string) bool {
 	if err := ss.writeUserMessage(text); err != nil {
 		return false
 	}
-	ss.pending++
+	ss.writes++
+	ss.cancelDeferredCloseLocked()
 	return true
 }
 
-// turnDone marks one user turn as completed. Closes stdin when no
-// turns remain so the CLI exits.
-func (ss *steerSession) turnDone() {
+// activity notes a non-result stream event: a turn is in progress, so
+// any deferred close would be premature.
+func (ss *steerSession) activity() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	ss.pending--
-	if ss.pending <= 0 && !ss.closed {
-		ss.closed = true
-		ss.stdin.Close()
+	ss.cancelDeferredCloseLocked()
+}
+
+// turnResult marks one result event. Closes stdin immediately when
+// every written message has a result; otherwise arms a deferred close
+// that fires unless another turn shows activity (or a new steer
+// arrives) first.
+func (ss *steerSession) turnResult() {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.results++
+	if ss.closed {
+		return
 	}
+	if ss.results >= ss.writes {
+		ss.closeLocked()
+		return
+	}
+	ss.cancelDeferredCloseLocked()
+	ss.closeTimer = time.AfterFunc(steerDrainGrace, func() {
+		ss.mu.Lock()
+		defer ss.mu.Unlock()
+		ss.closeLocked()
+	})
+}
+
+// cancelDeferredCloseLocked stops a pending deferred close. Callers
+// must hold ss.mu.
+func (ss *steerSession) cancelDeferredCloseLocked() {
+	if ss.closeTimer != nil {
+		ss.closeTimer.Stop()
+		ss.closeTimer = nil
+	}
+}
+
+// closeLocked closes stdin so the CLI exits. Callers must hold ss.mu.
+func (ss *steerSession) closeLocked() {
+	if ss.closed {
+		return
+	}
+	ss.closed = true
+	ss.cancelDeferredCloseLocked()
+	ss.stdin.Close()
 }
 
 // shutdown closes stdin unconditionally (process ended or errored).
 func (ss *steerSession) shutdown() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if !ss.closed {
-		ss.closed = true
-		ss.stdin.Close()
-	}
+	ss.closeLocked()
 }
 
 func (c *ClaudeCLI) registerSteer(sessionID string, ss *steerSession) {
@@ -232,7 +284,7 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
-	ss := &steerSession{stdin: stdin, pending: 1}
+	ss := &steerSession{stdin: stdin, writes: 1}
 	c.registerSteer(sessionID, ss)
 	defer c.unregisterSteer(sessionID, ss)
 
@@ -356,6 +408,12 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			continue
 		}
 
+		// Any event other than a result means a turn is in progress —
+		// cancel a deferred stdin close armed by a previous result.
+		if ss != nil && event.Type != "result" {
+			ss.activity()
+		}
+
 		switch event.Type {
 		case "assistant":
 			// Parse tool_use from message.content array
@@ -408,7 +466,7 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 				if onStatus != nil {
 					onStatus("TURN_RESULT:" + event.ResultText)
 				}
-				ss.turnDone()
+				ss.turnResult()
 			}
 		default:
 			if event.Content != "" {
