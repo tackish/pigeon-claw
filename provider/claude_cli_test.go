@@ -1,9 +1,87 @@
 package provider
 
 import (
+	"context"
+	"os/exec"
 	"strings"
 	"testing"
 )
+
+// streamJSONCmd builds a command that emits the given stream-json lines
+// on stdout, standing in for the claude CLI.
+func streamJSONCmd(lines ...string) *exec.Cmd {
+	var sb strings.Builder
+	for _, l := range lines {
+		sb.WriteString(l)
+		sb.WriteString("\n")
+	}
+	return exec.Command("bash", "-c", "cat <<'EOF'\n"+sb.String()+"EOF")
+}
+
+func TestExecuteCmdFailedRunReturnsError(t *testing.T) {
+	c := NewClaudeCLI("test-model", "")
+	// A failed run omits the result field entirely.
+	cmd := streamJSONCmd(`{"type":"result","subtype":"error_max_turns","is_error":true}`)
+
+	resp, err := c.executeCmd(context.Background(), cmd, nil, nil)
+	if err == nil {
+		t.Fatalf("expected an error for a run that produced no answer, got %+v", resp)
+	}
+	if !strings.Contains(err.Error(), "error_max_turns") {
+		t.Fatalf("error should name the failure subtype, got: %v", err)
+	}
+}
+
+func TestExecuteCmdEmptyResultDoesNotReportTurn(t *testing.T) {
+	c := NewClaudeCLI("test-model", "")
+	stdin := &fakeStdin{}
+	ss := &steerSession{stdin: stdin}
+
+	var statuses []string
+	onStatus := func(s string) { statuses = append(statuses, s) }
+
+	cmd := streamJSONCmd(`{"type":"result","subtype":"error_during_execution","is_error":true}`)
+	if _, err := c.executeCmd(context.Background(), cmd, onStatus, ss); err == nil {
+		t.Fatal("expected an error for a failed run")
+	}
+
+	for _, s := range statuses {
+		if strings.HasPrefix(s, "TURN_RESULT:") {
+			t.Fatalf("empty result must not be reported as a completed turn: %q", s)
+		}
+	}
+	if !stdin.closed {
+		t.Fatal("stdin should still close so the CLI exits")
+	}
+}
+
+func TestExecuteCmdDeliversResultText(t *testing.T) {
+	c := NewClaudeCLI("test-model", "")
+	stdin := &fakeStdin{}
+	ss := &steerSession{stdin: stdin}
+
+	var turns []string
+	onStatus := func(s string) {
+		if strings.HasPrefix(s, "TURN_RESULT:") {
+			turns = append(turns, strings.TrimPrefix(s, "TURN_RESULT:"))
+		}
+	}
+
+	cmd := streamJSONCmd(`{"type":"result","subtype":"success","result":"hello","usage":{"input_tokens":3,"output_tokens":4}}`)
+	resp, err := c.executeCmd(context.Background(), cmd, onStatus, ss)
+	if err != nil {
+		t.Fatalf("executeCmd: %v", err)
+	}
+	if resp.Content != "hello" {
+		t.Fatalf("Content = %q, want %q", resp.Content, "hello")
+	}
+	if resp.Usage.TotalTokens != 7 {
+		t.Fatalf("TotalTokens = %d, want 7", resp.Usage.TotalTokens)
+	}
+	if len(turns) != 1 || turns[0] != "hello" {
+		t.Fatalf("turn results = %v, want [hello]", turns)
+	}
+}
 
 // fakeStdin records writes and close calls for steerSession tests.
 type fakeStdin struct {

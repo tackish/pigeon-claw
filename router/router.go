@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -415,6 +416,13 @@ func (r *Router) trySessionAwareProvider(
 	defer cancel()
 
 	resp, err := sa.SendWithSession(ctx, systemPrompt, lastMsg.Content, imageParts, toolDefs, sessionID, resume, onStatus)
+	if errors.Is(err, provider.ErrRunFailed) {
+		// The run reached the provider and failed on its own terms — the
+		// session is still good, so keep it and report the failure
+		// instead of replaying the whole history into a new session.
+		slog.Warn("provider run failed", "provider", p.Name(), "session_id", sessionID, "error", err)
+		return nil, err
+	}
 	if err != nil && resume && ctx.Err() == nil {
 		// Resume failed (but NOT timeout) — session expired or lost.
 		// Retry as new session with conversation history as context.

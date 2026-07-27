@@ -247,12 +247,17 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		// pending) — deliver its text to the channel right away.
 		if strings.HasPrefix(status, "TURN_RESULT:") {
 			text := strings.TrimPrefix(status, "TURN_RESULT:")
+			sent := strings.TrimSpace(text) != ""
 			statusMu.Lock()
-			streamedResults = true
 			lastActivity = time.Now()
 			toolRunning = false
+			// Only a delivered turn suppresses the final send below —
+			// an empty result must not swallow the response.
+			if sent {
+				streamedResults = true
+			}
 			statusMu.Unlock()
-			if strings.TrimSpace(text) != "" {
+			if sent {
 				h.sendLongMessage(s, m.ChannelID, text)
 			}
 			return

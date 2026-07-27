@@ -1,6 +1,15 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrRunFailed marks a request that reached the provider and ended
+// without an answer (e.g. the CLI hit its turn limit or aborted
+// mid-execution). The session itself is intact, so callers should
+// surface the failure rather than rebuilding the session from history.
+var ErrRunFailed = errors.New("provider run failed")
 
 type Role string
 

@@ -317,6 +317,7 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 
 	var finalText strings.Builder
 	var totalInput, totalOutput int
+	var errSubtype string // set by a result event that failed without text
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer
@@ -348,6 +349,8 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			} `json:"usage"`
 			ResultText string  `json:"result"`
 			CostUSD    float64 `json:"cost_usd"`
+			Subtype    string  `json:"subtype"`
+			IsError    bool    `json:"is_error"`
 		}
 
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
@@ -396,16 +399,30 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 		case "result":
 			// One user turn completed. Multiple result events arrive
 			// when messages were steered into the run.
-			if finalText.Len() > 0 {
-				finalText.WriteString("\n\n")
-			}
-			finalText.WriteString(event.ResultText)
+			//
+			// A failed run (error_max_turns, error_during_execution, ...)
+			// omits the result field entirely, so an empty text here means
+			// there is no answer to deliver — remember why, and never
+			// report it as a completed turn.
 			totalInput += event.Usage.InputTokens
 			totalOutput += event.Usage.OutputTokens
-			if ss != nil {
-				if onStatus != nil {
+			if event.ResultText == "" {
+				if event.IsError && errSubtype == "" {
+					errSubtype = event.Subtype
+					if errSubtype == "" {
+						errSubtype = "unknown error"
+					}
+				}
+			} else {
+				if finalText.Len() > 0 {
+					finalText.WriteString("\n\n")
+				}
+				finalText.WriteString(event.ResultText)
+				if ss != nil && onStatus != nil {
 					onStatus("TURN_RESULT:" + event.ResultText)
 				}
+			}
+			if ss != nil {
 				// A response is out — the request is complete. Close
 				// stdin now; buffered steered messages still drain and
 				// stream their own results before the CLI exits.
@@ -431,6 +448,18 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			return nil, fmt.Errorf("claude cli error: %w, stderr: %s", err, stderr)
 		}
 		return nil, fmt.Errorf("claude cli error: %w", err)
+	}
+
+	// Exited cleanly but produced no answer: report the failure instead
+	// of returning an empty response the caller would silently drop.
+	if finalText.Len() == 0 {
+		if errSubtype != "" {
+			return nil, fmt.Errorf("%w: %s", ErrRunFailed, errSubtype)
+		}
+		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
+			return nil, fmt.Errorf("claude cli produced no result, stderr: %s", stderr)
+		}
+		return nil, fmt.Errorf("claude cli produced no result")
 	}
 
 	return &Response{
