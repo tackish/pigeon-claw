@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 )
 
 type ClaudeCLI struct {
@@ -34,28 +33,21 @@ func NewClaudeCLI(model, fallback string) *ClaudeCLI {
 // stream-json, whose stdin stays open so additional user messages can
 // be injected while it works.
 //
-// Written messages and result events don't map 1:1: a message steered
-// into a running turn may be merged into that turn and answered by its
-// single result event (verified against claude CLI 2.1.172), or queued
-// and answered by a turn of its own. So stdin closes immediately only
-// when results have caught up with writes; when a result arrives with
-// writes still ahead, the run may already be drained (merge) or about
-// to start another turn (queue) — indistinguishable here — and stdin
-// closes after steerDrainGrace unless new stream activity proves
-// another turn started.
+// stdin closes as soon as the first result event arrives: a response
+// means the request is complete. The CLI never exits on its own while
+// stdin is open, and idle-stream events (hook_started, rate_limit_event,
+// task_notification, ...) keep arriving after a result, so any
+// "wait for quiet" heuristic ends up cancelled forever. Closing eagerly
+// is safe for messages steered before the result: they were either
+// merged into the running turn and answered by it, or are still
+// buffered in the pipe — the CLI drains and answers them before
+// exiting on EOF (verified against claude CLI 2.1.172). Messages
+// arriving after the close start a fresh request via --resume.
 type steerSession struct {
-	mu         sync.Mutex
-	stdin      io.WriteCloser
-	writes     int // user messages written to stdin
-	results    int // result events seen
-	closed     bool
-	closeTimer *time.Timer // deferred close armed by turnResult, nil if none
+	mu     sync.Mutex
+	stdin  io.WriteCloser
+	closed bool
 }
-
-// steerDrainGrace is how long after a result event stdin stays open
-// waiting for evidence that the CLI started another turn for a queued
-// steered message. Measured turn-start latency is ~3s.
-var steerDrainGrace = 10 * time.Second
 
 // writeUserMessage writes one stream-json user message line. Callers
 // must hold ss.mu.
@@ -86,66 +78,19 @@ func (ss *steerSession) steer(text string) bool {
 	if err := ss.writeUserMessage(text); err != nil {
 		return false
 	}
-	ss.writes++
-	ss.cancelDeferredCloseLocked()
 	return true
 }
 
-// activity notes a non-result stream event: a turn is in progress, so
-// any deferred close would be premature.
-func (ss *steerSession) activity() {
+// shutdown closes stdin so the CLI exits once it has drained any
+// remaining buffered input. Idempotent.
+func (ss *steerSession) shutdown() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	ss.cancelDeferredCloseLocked()
-}
-
-// turnResult marks one result event. Closes stdin immediately when
-// every written message has a result; otherwise arms a deferred close
-// that fires unless another turn shows activity (or a new steer
-// arrives) first.
-func (ss *steerSession) turnResult() {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	ss.results++
-	if ss.closed {
-		return
-	}
-	if ss.results >= ss.writes {
-		ss.closeLocked()
-		return
-	}
-	ss.cancelDeferredCloseLocked()
-	ss.closeTimer = time.AfterFunc(steerDrainGrace, func() {
-		ss.mu.Lock()
-		defer ss.mu.Unlock()
-		ss.closeLocked()
-	})
-}
-
-// cancelDeferredCloseLocked stops a pending deferred close. Callers
-// must hold ss.mu.
-func (ss *steerSession) cancelDeferredCloseLocked() {
-	if ss.closeTimer != nil {
-		ss.closeTimer.Stop()
-		ss.closeTimer = nil
-	}
-}
-
-// closeLocked closes stdin so the CLI exits. Callers must hold ss.mu.
-func (ss *steerSession) closeLocked() {
 	if ss.closed {
 		return
 	}
 	ss.closed = true
-	ss.cancelDeferredCloseLocked()
 	ss.stdin.Close()
-}
-
-// shutdown closes stdin unconditionally (process ended or errored).
-func (ss *steerSession) shutdown() {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	ss.closeLocked()
 }
 
 func (c *ClaudeCLI) registerSteer(sessionID string, ss *steerSession) {
@@ -284,7 +229,7 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
-	ss := &steerSession{stdin: stdin, writes: 1}
+	ss := &steerSession{stdin: stdin}
 	c.registerSteer(sessionID, ss)
 	defer c.unregisterSteer(sessionID, ss)
 
@@ -328,9 +273,10 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 }
 
 // executeCmd runs the CLI and streams its stream-json output. When ss
-// is non-nil the run accepts steered messages: each result event
-// completes one user turn and is pushed to the caller immediately via
-// a TURN_RESULT status; stdin closes once all pending turns finish.
+// is non-nil the run accepts steered messages: each result event is
+// pushed to the caller immediately via a TURN_RESULT status, and the
+// first result closes stdin so the CLI exits after draining any
+// buffered steered messages.
 func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus StatusCallback, ss *steerSession) (*Response, error) {
 	// Put claude-cli in its own process group so we can kill JUST it on
 	// timeout without reaping legitimate long-running child processes
@@ -408,12 +354,6 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			continue
 		}
 
-		// Any event other than a result means a turn is in progress —
-		// cancel a deferred stdin close armed by a previous result.
-		if ss != nil && event.Type != "result" {
-			ss.activity()
-		}
-
 		switch event.Type {
 		case "assistant":
 			// Parse tool_use from message.content array
@@ -466,7 +406,10 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 				if onStatus != nil {
 					onStatus("TURN_RESULT:" + event.ResultText)
 				}
-				ss.turnResult()
+				// A response is out — the request is complete. Close
+				// stdin now; buffered steered messages still drain and
+				// stream their own results before the CLI exits.
+				ss.shutdown()
 			}
 		default:
 			if event.Content != "" {
