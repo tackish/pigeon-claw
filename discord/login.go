@@ -32,6 +32,13 @@ import (
 
 const loginTimeout = 10 * time.Minute
 
+// codeSilenceTimeout is how long a submitted code may sit with no
+// recognizable CLI reaction before we relay whatever the terminal is
+// actually showing. Without it a code that neither succeeds nor prints a
+// matching error leaves the channel on "⏳ 코드 확인 중..." for the full
+// loginTimeout with nothing to act on.
+var codeSilenceTimeout = 25 * time.Second
+
 var (
 	// The canonical sign-in URL is embedded in an OSC-8 hyperlink escape
 	// (ESC ] 8 ; params ; URI ST) — always complete and never line-wrapped,
@@ -213,13 +220,98 @@ func (h *Handler) handleLoginCode(s *discordgo.Session, channelID, code string) 
 		return
 	}
 	fl.mu.Lock()
-	fl.submitOffset = fl.raw.Len()
+	offset := fl.raw.Len()
+	fl.submitOffset = offset
 	fl.mu.Unlock()
 	if _, err := fl.ptmx.Write([]byte(code + "\r")); err != nil {
 		s.ChannelMessageSend(channelID, fmt.Sprintf("-# ❌ 코드 전송 실패: %s", err))
 		return
 	}
 	s.ChannelMessageSend(channelID, "-# ⏳ 코드 확인 중...")
+	go h.watchCodeSilence(s, fl, offset)
+}
+
+// watchCodeSilence relays the CLI's visible output when a submitted code
+// produces neither a token nor a recognized error within
+// codeSilenceTimeout, so a wedged login is diagnosable from Discord
+// instead of just hanging.
+func (h *Handler) watchCodeSilence(s *discordgo.Session, fl *loginFlow, offset int) {
+	select {
+	case <-time.After(codeSilenceTimeout):
+	case <-fl.cancel:
+		return
+	}
+
+	h.loginMu.Lock()
+	stillActive := h.activeLogin == fl
+	h.loginMu.Unlock()
+	if !stillActive {
+		return // already finished, cancelled, or timed out
+	}
+
+	fl.mu.Lock()
+	pending := fl.submitOffset == offset // nothing consumed this submission yet
+	raw := fl.raw.String()
+	if pending {
+		fl.submitOffset = -1 // one silence notice per submission
+	}
+	fl.mu.Unlock()
+	if !pending || offset > len(raw) {
+		return
+	}
+
+	snapshot := loginOutputSnapshot(raw[offset:])
+	if snapshot == "" {
+		snapshot = "(CLI가 아무 출력도 내지 않았습니다)"
+	}
+	s.ChannelMessageSend(fl.channelID, fmt.Sprintf(
+		"-# ⚠️ 코드 제출 후 %s 동안 응답이 없습니다. CLI 화면 상태:\n```%s```\n"+
+			"새 코드로 `/code <코드>` 재시도하거나 `!cancel` 로 중단하세요. (전체 로그: ~/.pigeon-claw/login.log)",
+		codeSilenceTimeout, snapshot))
+}
+
+// cancelActiveLogin aborts an in-progress login if there is one, reporting
+// to the channel that started it. Returns false when no login is active.
+func (h *Handler) cancelActiveLogin(s *discordgo.Session) bool {
+	h.loginMu.Lock()
+	fl := h.activeLogin
+	h.loginMu.Unlock()
+	if fl == nil {
+		return false
+	}
+	if !h.claimLogin(fl) {
+		return false
+	}
+	teardownLogin(fl)
+	s.ChannelMessageSend(fl.channelID, "-# 🚫 진행 중이던 로그인을 취소했습니다.")
+	return true
+}
+
+// loginOutputSnapshot renders the tail of raw pty output as plain text:
+// escapes stripped, spinner frames and masked echoes dropped. Unlike
+// extractLoginFeedback it keeps every visible line, since the point is to
+// show whatever the CLI is stuck on.
+func loginOutputSnapshot(raw string) string {
+	clean := loginAnsiRe.ReplaceAllString(raw, "")
+	clean = strings.ReplaceAll(clean, "\r", "\n")
+	var lines []string
+	seen := map[string]bool{}
+	for _, ln := range strings.Split(clean, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || seen[ln] || strings.Contains(ln, "***") {
+			continue
+		}
+		seen[ln] = true
+		lines = append(lines, ln)
+	}
+	if len(lines) > 8 {
+		lines = lines[len(lines)-8:] // most recent state only
+	}
+	out := strings.Join(lines, "\n")
+	if len(out) > 800 {
+		out = out[len(out)-800:]
+	}
+	return out
 }
 
 // handleLoginCancel aborts an in-progress login.

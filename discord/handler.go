@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -476,9 +475,10 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 
-			// Release PID lock before exit
-			home, _ := os.UserHomeDir()
-			os.Remove(filepath.Join(home, ".pigeon-claw", "pigeon-claw.pid"))
+			// The instance lock is an flock on an O_CLOEXEC descriptor:
+			// exec drops it and the new image re-acquires it. Deleting the
+			// file here would create a second lockable inode and let a
+			// duplicate instance start alongside this one.
 
 			// Use symlink path (e.g. /opt/homebrew/bin/pigeon-claw) directly.
 			// Do NOT resolve symlinks — we want to always run the currently-linked
@@ -510,6 +510,9 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		if cancel, ok := h.cancelFuncs.LoadAndDelete(m.ChannelID); ok {
 			cancel.(context.CancelFunc)()
 			s.ChannelMessageSend(m.ChannelID, "-# 현재 요청을 취소했습니다.")
+		} else if h.cancelActiveLogin(s) {
+			// A stuck login isn't a router request, but !cancel is what
+			// users reach for — don't make them guess !login-cancel.
 		} else {
 			s.ChannelMessageSend(m.ChannelID, "-# 처리 중인 요청이 없습니다.")
 		}
