@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -17,13 +18,14 @@ import (
 	"github.com/tackish/pigeon-claw/i18n"
 	"github.com/tackish/pigeon-claw/provider"
 	"github.com/tackish/pigeon-claw/router"
+	"github.com/tackish/pigeon-claw/update"
 )
 
 const (
 	maxDiscordMessage   = 2000
 	fileUploadThreshold = 10000
-	typingInterval   = 10 * time.Second
-	maxImageDownload = 20 * 1024 * 1024 // 20MB
+	typingInterval      = 10 * time.Second
+	maxImageDownload    = 20 * 1024 * 1024 // 20MB
 )
 
 var imageContentTypes = map[string]bool{
@@ -40,16 +42,16 @@ type retryInfo struct {
 }
 
 type Handler struct {
-	router            *router.Router
-	channelLocks      sync.Map // map[channelID]*sync.Mutex
-	retryMessages     sync.Map // map[messageID]*retryInfo
-	activeRequests    sync.Map // map[channelID]string — content being processed
-	cancelFuncs       sync.Map // map[channelID]context.CancelFunc
-	recordingNames    sync.Map // map[channelID]string — name for current recording
-	mu                sync.RWMutex
-	allowedChannels   map[string]bool
-	mentionChannels   map[string]bool
-	msgs              i18n.Messages
+	router          *router.Router
+	channelLocks    sync.Map // map[channelID]*sync.Mutex
+	retryMessages   sync.Map // map[messageID]*retryInfo
+	activeRequests  sync.Map // map[channelID]string — content being processed
+	cancelFuncs     sync.Map // map[channelID]context.CancelFunc
+	recordingNames  sync.Map // map[channelID]string — name for current recording
+	mu              sync.RWMutex
+	allowedChannels map[string]bool
+	mentionChannels map[string]bool
+	msgs            i18n.Messages
 
 	loginMu     sync.Mutex // guards activeLogin
 	activeLogin *loginFlow // in-progress claude setup-token flow, nil if none
@@ -194,7 +196,7 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	var lastStatus string
 	var cliPID string // display string, e.g. "🚀 CLI started (PID 2762)"
 	var lastActivity time.Time
-	var toolRunning bool // true while a Bash/Read/Edit tool is executing
+	var toolRunning bool     // true while a Bash/Read/Edit tool is executing
 	var streamedResults bool // true once turn results were sent via TURN_RESULT
 	var statusMu sync.Mutex
 
@@ -491,8 +493,17 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 
 	case content == "!status":
 		sess := h.router.GetSessions().GetOrCreate(m.ChannelID)
-		msg := fmt.Sprintf("**Status**\n- Active Provider: %s\n- Messages: %d",
-			sess.GetActiveProvider(), sess.MessageCount())
+		// Host, PID and version identify which process answered. Every
+		// instance on the token replies, so two answers here means two
+		// bots are live — the thing that makes commands run twice and
+		// /login hand out two competing OAuth URLs. A machine-local lock
+		// cannot catch a duplicate on another host, so surface it instead.
+		host, err := os.Hostname()
+		if err != nil {
+			host = "unknown"
+		}
+		msg := fmt.Sprintf("**Status** — `%s` pid %d, v%s\n- Active Provider: %s\n- Messages: %d",
+			host, os.Getpid(), update.Current(), sess.GetActiveProvider(), sess.MessageCount())
 		s.ChannelMessageSend(m.ChannelID, msg)
 		return true
 

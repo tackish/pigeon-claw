@@ -7,6 +7,7 @@ import (
 
 	"github.com/tackish/pigeon-claw/bot"
 	"github.com/tackish/pigeon-claw/config"
+	"github.com/tackish/pigeon-claw/update"
 )
 
 func runServe() {
@@ -17,6 +18,9 @@ func runServe() {
 	}
 
 	setupLogger(cfg.LogLevel)
+	// Record the build version before anything can report it (/status,
+	// /update), independently of whether the update check runs.
+	update.SetCurrent(version)
 
 	home, _ := os.UserHomeDir()
 	lockPath := filepath.Join(home, ".pigeon-claw", "pigeon-claw.pid")

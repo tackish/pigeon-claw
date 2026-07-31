@@ -62,7 +62,12 @@ func (b *Bot) Run() error {
 	}
 	defer b.session.Close()
 
-	slog.Info("bot is running", "user", b.session.State.User.Username)
+	host, _ := os.Hostname()
+	// Host and PID make a duplicate instance obvious in the log: two of
+	// these lines means two bots are on the token, so every command runs
+	// twice. A machine-local lock cannot catch a duplicate on another host.
+	slog.Info("bot is running", "user", b.session.State.User.Username,
+		"host", host, "pid", os.Getpid())
 
 	// Register slash commands
 	b.handler.RegisterSlashCommands(b.session)
