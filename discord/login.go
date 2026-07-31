@@ -39,6 +39,10 @@ type messageSender interface {
 	ChannelMessageSend(channelID, content string, options ...discordgo.RequestOption) (*discordgo.Message, error)
 }
 
+// loginStartNotice is also the twin probe: both instances post it
+// verbatim, so a second copy in the channel means a second bot.
+const loginStartNotice = "🔐 Claude 재인증을 시작합니다. 인증 URL을 기다리는 중..."
+
 const loginTimeout = 10 * time.Minute
 
 // codeSilenceTimeout is how long a submitted code may sit with no
@@ -82,12 +86,14 @@ type loginFlow struct {
 
 // handleLogin starts `claude setup-token` under a pty and begins relaying its
 // output to Discord. Only one login may run at a time.
-func (h *Handler) handleLogin(s messageSender, channelID string) {
+// Returns the ID of the announcement it posted, or "" if none was
+// posted — the caller uses it to look for a duplicate instance's copy.
+func (h *Handler) handleLogin(s messageSender, channelID string) string {
 	h.loginMu.Lock()
 	if h.activeLogin != nil {
 		h.loginMu.Unlock()
 		s.ChannelMessageSend(channelID, "-# ⚠️ 이미 로그인이 진행 중입니다. 코드를 `/code <코드>` 로 보내거나 `/login-cancel` 로 취소하세요.")
-		return
+		return ""
 	}
 
 	cmd := exec.Command(provider.FindClaudeBin(), "setup-token")
@@ -99,7 +105,7 @@ func (h *Handler) handleLogin(s messageSender, channelID string) {
 	if err != nil {
 		h.loginMu.Unlock()
 		s.ChannelMessageSend(channelID, fmt.Sprintf("-# ❌ 로그인 시작 실패: %s", err))
-		return
+		return ""
 	}
 	// A wide terminal keeps the URL and token on single lines (no wrapping).
 	_ = pty.Setsize(ptmx, &pty.Winsize{Rows: 50, Cols: 400})
@@ -115,7 +121,7 @@ func (h *Handler) handleLogin(s messageSender, channelID string) {
 	h.activeLogin = fl
 	h.loginMu.Unlock()
 
-	s.ChannelMessageSend(channelID, "🔐 Claude 재인증을 시작합니다. 인증 URL을 기다리는 중...")
+	announced, _ := s.ChannelMessageSend(channelID, loginStartNotice)
 
 	go h.runLoginReader(s, fl)
 
@@ -129,6 +135,11 @@ func (h *Handler) handleLogin(s messageSender, channelID string) {
 		case <-fl.cancel:
 		}
 	}()
+
+	if announced != nil {
+		return announced.ID
+	}
+	return ""
 }
 
 // runLoginReader drains the pty: relays the sign-in URL once, relays CLI

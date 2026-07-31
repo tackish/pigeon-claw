@@ -62,8 +62,8 @@ func obsWSRequest(requestType string, requestData map[string]interface{}) (map[s
 	var hello struct {
 		Op int `json:"op"`
 		D  struct {
-			RPCVersion         int `json:"rpcVersion"`
-			Authentication     *struct {
+			RPCVersion     int `json:"rpcVersion"`
+			Authentication *struct {
 				Challenge string `json:"challenge"`
 				Salt      string `json:"salt"`
 			} `json:"authentication"`

@@ -465,7 +465,12 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		return true
 
 	case content == "!login":
-		h.handleLogin(s, m.ChannelID)
+		// The announcement doubles as a duplicate-instance probe: a second
+		// copy in the channel explains two sign-in URLs with competing
+		// OAuth challenges, which is why a pasted code matches neither.
+		if id := h.handleLogin(s, m.ChannelID); id != "" {
+			go h.checkForTwin(s, m.ChannelID, id, loginStartNotice)
+		}
 		return true
 
 	case strings.HasPrefix(content, "!code"):
@@ -520,7 +525,12 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		}
 		msg := fmt.Sprintf("**Status** — `%s` pid %d, v%s\n- Active Provider: %s\n- Messages: %d",
 			host, os.Getpid(), update.Current(), sess.GetActiveProvider(), sess.MessageCount())
-		s.ChannelMessageSend(m.ChannelID, msg)
+		sent, err := s.ChannelMessageSend(m.ChannelID, msg)
+		// Read the channel back: a second reply to this same command is a
+		// duplicate instance, which no machine-local check can see.
+		if err == nil && sent != nil {
+			go h.checkForTwin(s, m.ChannelID, sent.ID, "**Status**")
+		}
 		return true
 
 	case content == "!provider":
