@@ -27,6 +27,7 @@ var langs = map[string]Messages{
 			"| `!reset` | 현재 채널 세션 초기화 |\n" +
 			"| `!cancel` | 처리 중인 요청 취소 |\n" +
 			"| `!restart` | 봇 프로세스 재시작 |\n" +
+			"| `!update` | 최신 릴리스로 업데이트 후 재시작 |\n" +
 			"| `!status` | 현재 provider 및 메시지 수 |\n" +
 			"| `!debug` | 마지막 에러, 세션 정보 |\n" +
 			"| `!model` | 모델 목록 / 변경 |\n" +
@@ -46,6 +47,7 @@ var langs = map[string]Messages{
 			"| `!reset` | セッションリセット |\n" +
 			"| `!cancel` | リクエストキャンセル |\n" +
 			"| `!restart` | ボット再起動 |\n" +
+			"| `!update` | 最新リリースに更新して再起動 |\n" +
 			"| `!status` | ステータス確認 |\n" +
 			"| `!debug` | デバッグ情報 |\n" +
 			"| `!model` | モデル一覧/変更 |\n" +
@@ -65,6 +67,7 @@ var langs = map[string]Messages{
 			"| `!reset` | 重置会话 |\n" +
 			"| `!cancel` | 取消当前请求 |\n" +
 			"| `!restart` | 重启机器人 |\n" +
+			"| `!update` | 更新到最新版本并重启 |\n" +
 			"| `!status` | 状态信息 |\n" +
 			"| `!debug` | 调试信息 |\n" +
 			"| `!model` | 模型列表/更改 |\n" +
@@ -87,6 +90,7 @@ var defaultMessages = Messages{
 		"| `!reset` | Reset channel session |\n" +
 		"| `!cancel` | Cancel current request |\n" +
 		"| `!restart` | Restart bot process |\n" +
+		"| `!update` | Update to the latest release and restart |\n" +
 		"| `!status` | Show provider & message count |\n" +
 		"| `!debug` | Last error & session info |\n" +
 		"| `!model` | List/change models |\n" +

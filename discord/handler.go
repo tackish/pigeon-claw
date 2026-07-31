@@ -7,12 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -472,38 +470,11 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 
 	case content == "!restart":
 		s.ChannelMessageSend(m.ChannelID, "-# 재시작 중...")
-		go func() {
-			time.Sleep(500 * time.Millisecond)
+		go h.restartProcess(m.ChannelID)
+		return true
 
-			// The instance lock is an flock on an O_CLOEXEC descriptor:
-			// exec drops it and the new image re-acquires it. Deleting the
-			// file here would create a second lockable inode and let a
-			// duplicate instance start alongside this one.
-
-			// Use symlink path (e.g. /opt/homebrew/bin/pigeon-claw) directly.
-			// Do NOT resolve symlinks — we want to always run the currently-linked
-			// version, so brew upgrades take effect on restart.
-			exe, err := exec.LookPath("pigeon-claw")
-			if err != nil {
-				exe, _ = os.Executable()
-			}
-
-			slog.Info("restarting", "binary", exe)
-
-			// Pass restart channel so new process can send completion message
-			env := os.Environ()
-			env = append(env, "PIGEON_RESTART_CHANNEL="+m.ChannelID)
-
-			if err := syscall.Exec(exe, []string{exe, "serve"}, env); err != nil {
-				slog.Error("syscall.Exec failed, falling back to cmd.Start", "error", err)
-				cmd := exec.Command(exe, "serve")
-				cmd.Env = env
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				cmd.Start()
-				os.Exit(0)
-			}
-		}()
+	case content == "!update":
+		go h.handleUpdate(s, m.ChannelID)
 		return true
 
 	case content == "!cancel":
@@ -818,6 +789,7 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "reset", Description: "Reset current channel session"},
 	{Name: "cancel", Description: "Cancel the current request"},
 	{Name: "restart", Description: "Restart bot (includes update check)"},
+	{Name: "update", Description: "Update pigeon-claw to the latest release and restart"},
 	{Name: "status", Description: "Show active provider and message count"},
 	{Name: "debug", Description: "Show last error, session ID, debug info"},
 	{Name: "model", Description: "List or change provider models"},

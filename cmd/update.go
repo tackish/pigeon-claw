@@ -2,70 +2,48 @@ package cmd
 
 import (
 	"bufio"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/tackish/pigeon-claw/update"
 )
 
+// checkUpdate runs at startup: if a newer release exists, upgrade and
+// re-exec into it. The version comparison and brew invocation live in the
+// update package so the Discord /update command shares them.
 func checkUpdate() {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("https://api.github.com/repos/tackish/pigeon-claw/releases/latest")
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
+	update.SetCurrent(version)
 
-	if resp.StatusCode != 200 {
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	latest, err := update.Latest(ctx)
+	cancel()
+	if err != nil || !update.IsNewer(latest, version) {
 		return
 	}
 
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if json.Unmarshal(body, &release) != nil {
+	slog.Warn("new version available", "current", version, "latest", latest)
+	fmt.Printf("\n  ⬆ New version available: %s → %s\n\n", version, latest)
+
+	// Non-interactive (launchd daemon): no one is there to answer.
+	if !isTerminal(os.Stdin) {
+		slog.Info("non-interactive environment, auto-updating")
+		runBrewUpdate()
 		return
 	}
 
-	latest := strings.TrimPrefix(release.TagName, "v")
-	current := version
-	if current == "dev" || current == "" {
-		return
-	}
-
-	if isNewer(latest, current) {
-		slog.Warn("new version available", "current", current, "latest", latest)
-		fmt.Printf("\n  ⬆ New version available: %s → %s\n", current, latest)
+	answer := promptWithTimeout("  Update now? [Y/n] (auto-update in 10s): ", 10*time.Second)
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "", "y", "yes":
+		runBrewUpdate()
+	default:
+		fmt.Println("  Skipped. Run manually: brew update && brew upgrade pigeon-claw")
 		fmt.Println()
-
-		// If not running in a terminal (e.g., launchd daemon), skip the prompt
-		// and auto-update immediately.
-		if !isTerminal(os.Stdin) {
-			slog.Info("non-interactive environment, auto-updating")
-			runBrewUpdate()
-			return
-		}
-
-		answer := promptWithTimeout("  Update now? [Y/n] (auto-update in 10s): ", 10*time.Second)
-		switch strings.ToLower(strings.TrimSpace(answer)) {
-		case "", "y", "yes":
-			runBrewUpdate()
-		default:
-			fmt.Println("  Skipped. Run manually: brew update && brew upgrade pigeon-claw")
-			fmt.Println()
-		}
 	}
 }
 
@@ -76,25 +54,6 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
-}
-
-// isNewer compares semver strings (e.g., "0.0.10" > "0.0.6")
-func isNewer(latest, current string) bool {
-	parse := func(v string) [3]int {
-		var parts [3]int
-		for i, s := range strings.SplitN(v, ".", 3) {
-			parts[i], _ = strconv.Atoi(s)
-		}
-		return parts
-	}
-	l, c := parse(latest), parse(current)
-	if l[0] != c[0] {
-		return l[0] > c[0]
-	}
-	if l[1] != c[1] {
-		return l[1] > c[1]
-	}
-	return l[2] > c[2]
 }
 
 func promptWithTimeout(prompt string, timeout time.Duration) string {
@@ -119,28 +78,20 @@ func promptWithTimeout(prompt string, timeout time.Duration) string {
 
 func runBrewUpdate() {
 	fmt.Println("  Updating...")
-	cmd := exec.Command("brew", "update")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("  ✗ brew update failed: %s\n", err)
-		return
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
-	cmd = exec.Command("brew", "upgrade", "pigeon-claw")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("  ✗ brew upgrade failed: %s\n", err)
+	if err := update.Upgrade(ctx); err != nil {
+		fmt.Printf("  ✗ %s\n", err)
 		return
 	}
 
 	fmt.Println("  ✓ Updated! Restarting...")
 	fmt.Println()
 
-	// The lock is an flock on an O_CLOEXEC descriptor: exec releases it and
-	// the new image re-acquires it. Deleting the file here would create a
-	// second lockable inode and let a duplicate instance start.
+	// The instance lock is an flock on an O_CLOEXEC descriptor: exec
+	// releases it and the new image re-acquires it. Deleting the file here
+	// would create a second lockable inode and let a duplicate start.
 
 	// Use the symlink path (not resolved) so we always run the upgraded binary.
 	exe, err := exec.LookPath("pigeon-claw")
