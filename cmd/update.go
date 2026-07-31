@@ -138,9 +138,9 @@ func runBrewUpdate() {
 	fmt.Println("  ✓ Updated! Restarting...")
 	fmt.Println()
 
-	// Release PID lock before re-exec
-	home, _ := os.UserHomeDir()
-	os.Remove(home + "/.pigeon-claw/pigeon-claw.pid")
+	// The lock is an flock on an O_CLOEXEC descriptor: exec releases it and
+	// the new image re-acquires it. Deleting the file here would create a
+	// second lockable inode and let a duplicate instance start.
 
 	// Use the symlink path (not resolved) so we always run the upgraded binary.
 	exe, err := exec.LookPath("pigeon-claw")

@@ -24,7 +24,7 @@ func runServe() {
 		slog.Error("cannot start", "error", err)
 		os.Exit(1)
 	}
-	defer releaseLock(lockPath)
+	defer releaseLock()
 
 	checkUpdate()
 	slog.Info("starting pigeon-claw",
