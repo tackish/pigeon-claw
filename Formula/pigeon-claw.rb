@@ -1,16 +1,16 @@
 class PigeonClaw < Formula
   desc "Discord-based remote Mac agent - lightweight alternative to openclaw"
   homepage "https://github.com/tackish/pigeon-claw"
-  version "0.0.50"
+  version "0.0.51"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/tackish/pigeon-claw/releases/download/v#{version}/pigeon-claw-darwin-arm64.tar.gz"
-      sha256 "f772410eef1e964ca8137633715305008c8254a59849e1a6d96bedd805497a4b"
+      sha256 "71bb1a9be9885e5ee1dd026a15c9316143a44c43336630d57338760e8d6e72ef"
     else
       url "https://github.com/tackish/pigeon-claw/releases/download/v#{version}/pigeon-claw-darwin-amd64.tar.gz"
-      sha256 "043bf6d027907fd07be209ea11274940aef2f8ae07b211e3fabb1152e15e3109"
+      sha256 "3e279383402a7771a1255d1108c039e2887eef88252d444cbd49cf3daf09b031"
     end
   end
 
