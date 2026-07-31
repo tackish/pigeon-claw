@@ -30,6 +30,15 @@ import (
 // Enter to retry.") — we relay those lines to Discord and auto-press Enter so
 // the user can simply /code again with a fresh code.
 
+// messageSender is the slice of *discordgo.Session the login flow needs.
+// Depending on the interface rather than the concrete session lets the
+// flow be driven end-to-end in a test — spawning the real CLI, relaying a
+// real URL, submitting a real code — without a Discord connection. That
+// path is where a silent login would hide, so it has to be testable.
+type messageSender interface {
+	ChannelMessageSend(channelID, content string, options ...discordgo.RequestOption) (*discordgo.Message, error)
+}
+
 const loginTimeout = 10 * time.Minute
 
 // codeSilenceTimeout is how long a submitted code may sit with no
@@ -73,7 +82,7 @@ type loginFlow struct {
 
 // handleLogin starts `claude setup-token` under a pty and begins relaying its
 // output to Discord. Only one login may run at a time.
-func (h *Handler) handleLogin(s *discordgo.Session, channelID string) {
+func (h *Handler) handleLogin(s messageSender, channelID string) {
 	h.loginMu.Lock()
 	if h.activeLogin != nil {
 		h.loginMu.Unlock()
@@ -124,7 +133,7 @@ func (h *Handler) handleLogin(s *discordgo.Session, channelID string) {
 
 // runLoginReader drains the pty: relays the sign-in URL once, relays CLI
 // feedback after each code submission, and finishes when a token appears.
-func (h *Handler) runLoginReader(s *discordgo.Session, fl *loginFlow) {
+func (h *Handler) runLoginReader(s messageSender, fl *loginFlow) {
 	buf := make([]byte, 4096)
 	urlSent := false
 	for {
@@ -248,7 +257,7 @@ func extractLoginFeedback(raw string) string {
 }
 
 // handleLoginCode feeds the pasted authorization code into the waiting pty.
-func (h *Handler) handleLoginCode(s *discordgo.Session, channelID, code string) {
+func (h *Handler) handleLoginCode(s messageSender, channelID, code string) {
 	h.loginMu.Lock()
 	fl := h.activeLogin
 	h.loginMu.Unlock()
@@ -277,7 +286,7 @@ func (h *Handler) handleLoginCode(s *discordgo.Session, channelID, code string) 
 // produces neither a token nor a recognized error within
 // codeSilenceTimeout, so a wedged login is diagnosable from Discord
 // instead of just hanging.
-func (h *Handler) watchCodeSilence(s *discordgo.Session, fl *loginFlow, offset int) {
+func (h *Handler) watchCodeSilence(s messageSender, fl *loginFlow, offset int) {
 	select {
 	case <-time.After(codeSilenceTimeout):
 	case <-fl.cancel:
@@ -314,7 +323,7 @@ func (h *Handler) watchCodeSilence(s *discordgo.Session, fl *loginFlow, offset i
 
 // cancelActiveLogin aborts an in-progress login if there is one, reporting
 // to the channel that started it. Returns false when no login is active.
-func (h *Handler) cancelActiveLogin(s *discordgo.Session) bool {
+func (h *Handler) cancelActiveLogin(s messageSender) bool {
 	h.loginMu.Lock()
 	fl := h.activeLogin
 	h.loginMu.Unlock()
@@ -357,7 +366,7 @@ func loginOutputSnapshot(raw string) string {
 }
 
 // handleLoginCancel aborts an in-progress login.
-func (h *Handler) handleLoginCancel(s *discordgo.Session, channelID string) {
+func (h *Handler) handleLoginCancel(s messageSender, channelID string) {
 	h.loginMu.Lock()
 	fl := h.activeLogin
 	h.loginMu.Unlock()
@@ -373,7 +382,7 @@ func (h *Handler) handleLoginCancel(s *discordgo.Session, channelID string) {
 
 // completeLogin persists the captured token and reports success. The caller
 // must have already won claimLogin.
-func (h *Handler) completeLogin(s *discordgo.Session, fl *loginFlow, token string) {
+func (h *Handler) completeLogin(s messageSender, fl *loginFlow, token string) {
 	teardownLogin(fl)
 	if err := persistOAuthToken(token); err != nil {
 		s.ChannelMessageSend(fl.channelID, fmt.Sprintf("-# ⚠️ 토큰은 발급됐지만 저장에 실패했습니다: %s", err))
