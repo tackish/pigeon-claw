@@ -40,10 +40,17 @@ const loginTimeout = 10 * time.Minute
 var codeSilenceTimeout = 25 * time.Second
 
 var (
-	// The canonical sign-in URL is embedded in an OSC-8 hyperlink escape
+	// Preferred form: the sign-in URL embedded in an OSC-8 hyperlink escape
 	// (ESC ] 8 ; params ; URI ST) — always complete and never line-wrapped,
 	// unlike the visible copy the terminal also prints.
 	osc8URLRe = regexp.MustCompile("\x1b\\]8;[^;]*;(https://[^\x1b\x07]+)")
+	// Fallback: the CLI only emits OSC-8 hyperlinks when it believes the
+	// terminal supports them, which it decides from environment variables a
+	// terminal emulator sets (TERM_PROGRAM and friends). Under launchd —
+	// how the bot actually runs — none are present and the URL is printed
+	// as plain text, so matching only the escape form meant never relaying
+	// a URL at all. Verified against claude CLI 2.1.172.
+	plainURLRe = regexp.MustCompile(`https://claude\.com/[^\s\x1b"'` + "`" + `]+`)
 	// Long-lived OAuth tokens look like sk-ant-oat01-...
 	oatTokenRe = regexp.MustCompile(`sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]+`)
 	// Terminal escape stripper: OSC sequences, CSI sequences, lone escapes.
@@ -133,10 +140,10 @@ func (h *Handler) runLoginReader(s *discordgo.Session, fl *loginFlow) {
 			fl.mu.Unlock()
 
 			if !urlSent {
-				if m := osc8URLRe.FindStringSubmatch(raw); m != nil {
+				if url := findSignInURL(raw); url != "" {
 					urlSent = true
 					s.ChannelMessageSend(fl.channelID, fmt.Sprintf(
-						"🔗 아래 URL을 브라우저에서 열어 로그인한 뒤, 표시되는 코드를 `/code <코드>` 로 보내주세요:\n%s", m[1]))
+						"🔗 아래 URL을 브라우저에서 열어 로그인한 뒤, 표시되는 코드를 `/code <코드>` 로 보내주세요:\n%s", url))
 				}
 			}
 			if tok := oatTokenRe.FindString(raw); tok != "" {
@@ -179,6 +186,41 @@ func (h *Handler) runLoginReader(s *discordgo.Session, fl *loginFlow) {
 		teardownLogin(fl)
 		s.ChannelMessageSend(fl.channelID, "-# ❌ 로그인이 완료되지 않았습니다. `/login` 으로 다시 시도하세요. (자세한 로그: ~/.pigeon-claw/login.log)")
 	}
+}
+
+// findSignInURL pulls the OAuth sign-in URL out of raw pty output,
+// preferring the OSC-8 hyperlink (complete and never line-wrapped) and
+// falling back to the plain-text copy the CLI prints when it thinks the
+// terminal has no hyperlink support — which is the daemon's situation.
+// Returns "" until a URL that actually starts the OAuth flow appears; the
+// welcome banner also carries claude.com links, and relaying one of those
+// would send the user somewhere that yields no code.
+func findSignInURL(raw string) string {
+	if m := osc8URLRe.FindStringSubmatch(raw); m != nil {
+		if isSignInURL(m[1]) {
+			return m[1]
+		}
+	}
+	for _, u := range plainURLRe.FindAllString(stripLoginANSI(raw), -1) {
+		// A wrapped or still-streaming line can truncate the query string;
+		// require the pieces the browser flow needs before relaying.
+		if isSignInURL(u) {
+			return u
+		}
+	}
+	return ""
+}
+
+func isSignInURL(u string) bool {
+	return strings.Contains(u, "/oauth/authorize") &&
+		strings.Contains(u, "code_challenge=") &&
+		strings.Contains(u, "state=")
+}
+
+// stripLoginANSI removes terminal escapes so URLs split by cursor
+// movement or colour codes are matchable as one string.
+func stripLoginANSI(raw string) string {
+	return loginAnsiRe.ReplaceAllString(raw, "")
 }
 
 // extractLoginFeedback strips terminal escapes from raw pty output and
