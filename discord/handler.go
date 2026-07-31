@@ -70,6 +70,26 @@ func (h *Handler) UpdateAllowedChannels(channels []string) {
 	h.mu.Unlock()
 }
 
+// channelPolicy reports how this instance treats channelID: whether it is
+// in the allow list, whether it is mention-only, and whether this instance
+// serves it at all.
+//
+// Both the message and interaction paths must consult it. Several bots can
+// share one token while being configured for different channels — a normal
+// deployment — and the gateway hands every event to all of them. The filter
+// is what keeps each in its own channels; an unfiltered path lets a foreign
+// instance answer here, which reads as the bot replying twice.
+func (h *Handler) channelPolicy(channelID string) (allowed, mentionOnly, serves bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	allowed = h.allowedChannels[channelID]
+	mentionOnly = h.mentionChannels[channelID]
+	hasFilter := len(h.allowedChannels) > 0 || len(h.mentionChannels) > 0
+	serves = !hasFilter || allowed || mentionOnly
+	return allowed, mentionOnly, serves
+}
+
 func (h *Handler) UpdateMentionChannels(channels []string) {
 	mention := make(map[string]bool)
 	for _, ch := range channels {
@@ -112,12 +132,8 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	}
 
 	// Ignore channels not in allowed or mention list
-	h.mu.RLock()
-	isAllowed := h.allowedChannels[m.ChannelID]
-	isMentionOnly := h.mentionChannels[m.ChannelID]
-	hasFilter := len(h.allowedChannels) > 0 || len(h.mentionChannels) > 0
-	h.mu.RUnlock()
-	if hasFilter && !isAllowed && !isMentionOnly {
+	_, isMentionOnly, serves := h.channelPolicy(m.ChannelID)
+	if !serves {
 		return
 	}
 
@@ -900,6 +916,15 @@ func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 	// run the slash command a second time.
 	if h.dedupe != nil && !h.dedupe.firstTime(i.ID) {
 		slog.Warn("dropping duplicate interaction event", "interaction", i.ID)
+		return
+	}
+
+	// Slash commands were exempt from the channel filter that messages go
+	// through, so an instance configured for other channels still answered
+	// them here — the bot appeared to reply twice to /status and /login
+	// while replying once to ordinary messages. Check before acknowledging,
+	// so a foreign instance stays out of it entirely.
+	if _, _, serves := h.channelPolicy(i.ChannelID); !serves {
 		return
 	}
 
