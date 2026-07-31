@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAcquireLockRejectsSecondProcess is the regression test for duplicate
@@ -82,6 +83,103 @@ func TestAcquireLockIgnoresStaleFileContent(t *testing.T) {
 	if code := exitErr.ExitCode(); code != 3 {
 		t.Fatalf("second process exit code = %d, want 3 (lock held)", code)
 	}
+}
+
+// TestAcquireLockRefusesOldSchemeHolder covers the upgrade window that
+// actually bit: a binary from before the file lock records its PID and
+// never flocks, so the lock is free and a current binary happily starts
+// alongside it — two bots on one Discord token, every command run twice,
+// /login handing out two competing OAuth URLs.
+//
+// Simulated by writing a live pigeon-claw-ish PID with no flock held,
+// which is exactly the on-disk state such a binary leaves.
+func TestAcquireLockRefusesOldSchemeHolder(t *testing.T) {
+	if os.Getenv("PIGEON_LOCK_OLD_HOLDER") != "" {
+		// Stand in for the old binary: stay alive with our PID recorded
+		// in the lock file and no flock held.
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pigeon-claw.pid")
+
+	// The guard matches on the holder's command, so the stand-in has to
+	// actually be named pigeon-claw. Copy this test binary rather than a
+	// system one — a copied system binary fails macOS signature checks
+	// and is killed before it can hold anything.
+	standIn := filepath.Join(dir, "pigeon-claw")
+	self, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Skipf("cannot read test binary: %v", err)
+	}
+	if err := os.WriteFile(standIn, self, 0755); err != nil {
+		t.Fatalf("write stand-in: %v", err)
+	}
+
+	holder := exec.Command(standIn, "-test.run=TestAcquireLockRefusesOldSchemeHolder")
+	holder.Env = append(os.Environ(), "PIGEON_LOCK_OLD_HOLDER=1")
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start stand-in: %v", err)
+	}
+	defer func() {
+		_ = holder.Process.Kill()
+		_, _ = holder.Process.Wait()
+	}()
+
+	// Wait for it to be visible to ps under the pigeon-claw name.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, _ := exec.Command("ps", "-p", strconv.Itoa(holder.Process.Pid), "-o", "command=").Output()
+		if strings.Contains(string(out), "pigeon-claw") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Skipf("stand-in never appeared as pigeon-claw in ps: %q", out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Exactly the on-disk state an old binary leaves: its PID recorded,
+	// no flock held.
+	if err := os.WriteFile(path, []byte(strconv.Itoa(holder.Process.Pid)), 0644); err != nil {
+		t.Fatalf("write old-scheme pid file: %v", err)
+	}
+
+	err = acquireLock(path)
+	if err == nil {
+		releaseLock()
+		t.Fatalf("started alongside a live old-scheme instance (PID %d)", holder.Process.Pid)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(holder.Process.Pid)) {
+		t.Fatalf("error should name the holder PID, got: %v", err)
+	}
+}
+
+// TestAcquireLockIgnoresRecycledPID: refusing to start because an
+// unrelated program inherited a dead instance's PID would be worse than
+// the duplicate the check guards against.
+func TestAcquireLockIgnoresRecycledPID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pigeon-claw.pid")
+
+	// A long-lived process that is definitely not pigeon-claw.
+	other := exec.Command("sleep", "30")
+	if err := other.Start(); err != nil {
+		t.Fatalf("start unrelated process: %v", err)
+	}
+	defer func() {
+		_ = other.Process.Kill()
+		_, _ = other.Process.Wait()
+	}()
+
+	if err := os.WriteFile(path, []byte(strconv.Itoa(other.Process.Pid)), 0644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	if err := acquireLock(path); err != nil {
+		t.Fatalf("a recycled PID must not block startup: %v", err)
+	}
+	releaseLock()
 }
 
 // TestAcquireLockAfterReleaseSucceeds covers the restart path: once the

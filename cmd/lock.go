@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,8 +42,20 @@ func acquireLock(path string) error {
 		return fmt.Errorf("another instance is running; stop it with `pigeon-claw stop`")
 	}
 
-	// Record the PID for humans and `pigeon-claw status`. The flock, not
-	// this content, is what actually enforces exclusivity.
+	// Taking the flock is not proof we are alone: versions before the flock
+	// recorded a PID here and never locked the file, so an old binary still
+	// running leaves the lock free and both processes end up on the same
+	// Discord token. Honour the old scheme too while such binaries can
+	// still be out there.
+	if holder := livePigeonClaw(readLockPID(f)); holder != "" {
+		f.Close()
+		return fmt.Errorf("another instance is running (PID %s, predates the file lock); "+
+			"stop it with `pigeon-claw stop` or `pkill -f 'pigeon-claw serve'`", holder)
+	}
+
+	// Record the PID for humans, `pigeon-claw status`, and the check above.
+	// The flock, not this content, is what enforces exclusivity among
+	// current versions.
 	if err := f.Truncate(0); err == nil {
 		if _, err := f.Seek(0, io.SeekStart); err == nil {
 			fmt.Fprint(f, os.Getpid())
@@ -50,6 +63,32 @@ func acquireLock(path string) error {
 	}
 	lockFile = f
 	return nil
+}
+
+// livePigeonClaw returns pid when it names a running pigeon-claw that is
+// not this process, else "".
+//
+// Checked against the process's actual command, not just liveness: a
+// crashed instance's PID gets recycled, and refusing to start because an
+// unrelated program inherited the number would be worse than the duplicate
+// this guards against. Our own PID is expected here after `!restart`,
+// which execs and keeps it.
+func livePigeonClaw(pid string) string {
+	if pid == "" || pid == strconv.Itoa(os.Getpid()) {
+		return ""
+	}
+	n, err := strconv.Atoi(pid)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	if err := syscall.Kill(n, 0); err != nil {
+		return "" // gone
+	}
+	out, err := exec.Command("ps", "-p", pid, "-o", "command=").Output()
+	if err != nil || !strings.Contains(string(out), "pigeon-claw") {
+		return "" // PID recycled by something else
+	}
+	return pid
 }
 
 // readLockPID best-effort reads the PID recorded by the lock holder.
