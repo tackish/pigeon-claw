@@ -55,6 +55,9 @@ type Handler struct {
 
 	loginMu     sync.Mutex // guards activeLogin
 	activeLogin *loginFlow // in-progress claude setup-token flow, nil if none
+
+	// Gateway redeliveries are dropped here — see eventDedupe.
+	dedupe *eventDedupe
 }
 
 func (h *Handler) UpdateAllowedChannels(channels []string) {
@@ -86,12 +89,25 @@ func NewHandler(r *router.Router, allowedChannels, mentionChannels []string, lan
 	for _, ch := range mentionChannels {
 		mention[ch] = true
 	}
-	return &Handler{router: r, allowedChannels: allowed, mentionChannels: mention, msgs: i18n.Get(language)}
+	return &Handler{
+		router:          r,
+		allowedChannels: allowed,
+		mentionChannels: mention,
+		msgs:            i18n.Get(language),
+		dedupe:          newEventDedupe(5 * time.Minute),
+	}
 }
 
 func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Ignore bot's own messages
 	if m.Author.ID == s.State.User.ID {
+		return
+	}
+
+	// A redelivered message is not a second request — acting on it runs
+	// the command twice.
+	if h.dedupe != nil && !h.dedupe.firstTime(m.ID) {
+		slog.Warn("dropping duplicate message event", "message", m.ID, "channel", m.ChannelID)
 		return
 	}
 
@@ -867,6 +883,13 @@ func (h *Handler) RegisterSlashCommands(s *discordgo.Session) {
 
 func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+
+	// Same reasoning as OnMessageCreate: a redelivered interaction would
+	// run the slash command a second time.
+	if h.dedupe != nil && !h.dedupe.firstTime(i.ID) {
+		slog.Warn("dropping duplicate interaction event", "interaction", i.ID)
 		return
 	}
 
