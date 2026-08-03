@@ -88,8 +88,8 @@ func TestAcquireLockIgnoresStaleFileContent(t *testing.T) {
 // TestAcquireLockRefusesOldSchemeHolder covers the upgrade window that
 // actually bit: a binary from before the file lock records its PID and
 // never flocks, so the lock is free and a current binary happily starts
-// alongside it — two bots on one Discord token, every command run twice,
-// /login handing out two competing OAuth URLs.
+// alongside it — two bots on one Discord token, with every command run
+// twice and every message answered twice.
 //
 // Simulated by writing a live pigeon-claw-ish PID with no flock held,
 // which is exactly the on-disk state such a binary leaves.

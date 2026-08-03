@@ -64,7 +64,7 @@ pigeon-claw (same request):
 - **Per-channel sessions** — File-persisted conversation context
 - **Mention mode** — Respond to all messages or only when @mentioned
 - **Hot reload** — Change config without restarting (`SIGHUP`)
-- **Runtime model switching** — Change models from Discord with `!model`
+- **Runtime model switching** — Pick a model from a dropdown with `!model`
 - **Token tracking** — Shows provider + token count on every response
 - **Daemon management** — `start/stop/restart/reload/status/logs`
 - **Custom prompts** — Override system prompt via file
@@ -233,10 +233,10 @@ Type these in any channel the bot is active in:
 | Command | Description | Example |
 |---|---|---|
 | `!reset` | Clear current channel session | `!reset` |
-| `!status` | Show active provider and message count | `!status` |
-| `!provider` | Show provider priority with models | `!provider` |
-| `!model` | List all provider models | `!model` |
-| `!model <provider> <model>` | Change model at runtime | `!model ollama gemma4:e4b` |
+| `!cancel` | Cancel the running request and the queue | `!cancel` |
+| `!status` | Providers, models, queue and last error (alias `!debug`) | `!status` |
+| `!model` | Pick a model from a dropdown | `!model` |
+| `!model <provider> <model>` | Set any model by name | `!model ollama gemma4:e4b` |
 
 ### Examples
 
@@ -244,8 +244,8 @@ Type these in any channel the bot is active in:
 # Switch to a lighter Ollama model
 !model ollama gemma4:e4b
 
-# Switch Claude to Opus
-!model claude-cli claude-opus-4-20250514
+# Pin Claude CLI to a specific model
+!model claude-cli claude-opus-5
 
 # Check what's running
 !status

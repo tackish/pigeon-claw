@@ -7,8 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"os/exec"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +18,6 @@ import (
 	"github.com/tackish/pigeon-claw/i18n"
 	"github.com/tackish/pigeon-claw/provider"
 	"github.com/tackish/pigeon-claw/router"
-	"github.com/tackish/pigeon-claw/update"
 )
 
 const (
@@ -43,7 +42,7 @@ type retryInfo struct {
 
 type Handler struct {
 	router          *router.Router
-	channelLocks    sync.Map // map[channelID]*sync.Mutex
+	channelQueues   sync.Map // map[channelID]*channelQueue — one runner per channel
 	retryMessages   sync.Map // map[messageID]*retryInfo
 	activeRequests  sync.Map // map[channelID]string — content being processed
 	cancelFuncs     sync.Map // map[channelID]context.CancelFunc
@@ -52,9 +51,6 @@ type Handler struct {
 	allowedChannels map[string]bool
 	mentionChannels map[string]bool
 	msgs            i18n.Messages
-
-	loginMu     sync.Mutex // guards activeLogin
-	activeLogin *loginFlow // in-progress claude setup-token flow, nil if none
 
 	// Gateway redeliveries are dropped here — see eventDedupe.
 	dedupe *eventDedupe
@@ -165,36 +161,67 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	// Per-channel concurrency: 1 request at a time.
-	// If the user wants to interrupt, they can use !cancel.
-	semI, _ := h.channelLocks.LoadOrStore(m.ChannelID, make(chan struct{}, 1))
-	sem := semI.(chan struct{})
+	h.dispatch(s, m, true)
+}
 
-	select {
-	case sem <- struct{}{}:
-		// Acquired the slot
-	default:
-		// Channel is busy — steer the message into the running CLI
-		// session so the agent picks it up mid-task (text only; the
-		// steering path can't carry attachments).
-		if len(m.Attachments) == 0 && h.router.Steer(m.ChannelID, m.Content) {
-			s.MessageReactionAdd(m.ChannelID, m.ID, "➕")
-			return
-		}
-		// No live steerable run — show what's being processed
-		active, _ := h.activeRequests.Load(m.ChannelID)
-		preview := "..."
-		if str, ok := active.(string); ok && str != "" {
-			preview = str
-			if len(preview) > 80 {
-				preview = preview[:80] + "..."
-			}
-		}
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# %s", fmt.Sprintf(h.msgs.RequestInProgress, preview)))
+// dispatch routes one request: into a live run if that run can still take
+// it, otherwise onto the channel's queue.
+//
+// Every request goes through here — a Discord message and a 🔄 retry alike.
+// Running two at once on the same channel would have two CLI processes
+// resuming the same session, so the queue is the only way in.
+func (h *Handler) dispatch(s *discordgo.Session, m *discordgo.MessageCreate, allowSteer bool) {
+	// A live run can take the message directly — the agent picks it up
+	// mid-task (text only; the steering path can't carry attachments).
+	if allowSteer && len(m.Attachments) == 0 && h.router.Steer(m.ChannelID, m.Content) {
+		s.MessageReactionAdd(m.ChannelID, m.ID, "➕")
 		return
 	}
-	defer func() { <-sem }()
 
+	// Otherwise one request runs at a time per channel. Anything arriving
+	// while one is running waits its turn instead of being turned away —
+	// steering is already closed in the window between the answer and the
+	// run actually ending, and a message refused there is simply lost.
+	q := h.queueFor(m.ChannelID)
+	switch q.admit(m) {
+	case queued:
+		s.MessageReactionAdd(m.ChannelID, m.ID, "📥")
+		return
+	case rejected:
+		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
+			"-# ⚠️ 대기열이 가득 찼습니다 (%d개). 현재 요청이 끝난 뒤 다시 보내주세요.", maxQueuedPerChannel))
+		return
+	}
+
+	// This goroutine owns the channel until the backlog drains.
+	for {
+		h.runGuarded(s, m)
+		next := q.next()
+		if next == nil {
+			return
+		}
+		m = next
+	}
+}
+
+// runGuarded runs one request and contains a panic. Without this a panic
+// would skip the hand-off below and leave the channel marked as running
+// forever, so every later message would queue behind a request that already
+// died — the channel would go silent until the bot restarts.
+func (h *Handler) runGuarded(s *discordgo.Session, m *discordgo.MessageCreate) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("request panicked", "channel", m.ChannelID, "panic", r, "stack", string(debug.Stack()))
+			s.ChannelMessageSend(m.ChannelID, "-# ❌ 내부 오류로 요청이 중단되었습니다. 로그를 확인하세요.")
+			s.MessageReactionAdd(m.ChannelID, m.ID, "💥")
+		}
+	}()
+	h.processRequest(s, m)
+}
+
+// processRequest runs one request to completion and reports it in the
+// channel. The caller owns the channel slot (see channelQueue).
+func (h *Handler) processRequest(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Track what's being processed for concurrency messages
 	h.activeRequests.Store(m.ChannelID, m.Content)
 	defer h.activeRequests.Delete(m.ChannelID)
@@ -383,14 +410,10 @@ func (h *Handler) OnMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		h.sendLongMessage(s, m.ChannelID, result.Text)
 	}
 
-	// Show token usage
-	if result.TotalTokens > 0 {
-		footer := fmt.Sprintf("-# %s | %d tokens", result.Provider, result.TotalTokens)
-		if result.ToolsUsed > 0 {
-			footer += fmt.Sprintf(" | %d tools", result.ToolsUsed)
-		}
-		s.ChannelMessageSend(m.ChannelID, footer)
-	}
+	// Close with what the request actually did — elapsed time, cost, and
+	// the tools that ran — so a reply never just stops.
+	delivered := streamed || result.Text != "" || result.ImageData != nil
+	s.ChannelMessageSend(m.ChannelID, requestSummary(result, time.Since(startTime), delivered))
 
 	// Status emoji based on what happened
 	switch {
@@ -480,23 +503,6 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		}
 		return true
 
-	case content == "!login":
-		// The announcement doubles as a duplicate-instance probe: a second
-		// copy in the channel explains two sign-in URLs with competing
-		// OAuth challenges, which is why a pasted code matches neither.
-		if id := h.handleLogin(s, m.ChannelID); id != "" {
-			go h.checkForTwin(s, m.ChannelID, id, loginStartNotice)
-		}
-		return true
-
-	case strings.HasPrefix(content, "!code"):
-		h.handleLoginCode(s, m.ChannelID, strings.TrimSpace(strings.TrimPrefix(content, "!code")))
-		return true
-
-	case content == "!login-cancel":
-		h.handleLoginCancel(s, m.ChannelID)
-		return true
-
 	case content == "!stop-recording" || strings.HasPrefix(content, "!stop-recording "):
 		folderArg := strings.TrimSpace(strings.TrimPrefix(content, "!stop-recording"))
 		h.handleStopRecording(s, m.ChannelID, folderArg)
@@ -517,101 +523,29 @@ func (h *Handler) handleBuiltinCommand(s *discordgo.Session, m *discordgo.Messag
 		return true
 
 	case content == "!cancel":
+		// Cancelling the running request while its follow-ups go ahead
+		// anyway is not what anyone means by cancel — drop those too.
+		dropped := h.queueFor(m.ChannelID).drop()
 		if cancel, ok := h.cancelFuncs.LoadAndDelete(m.ChannelID); ok {
 			cancel.(context.CancelFunc)()
-			s.ChannelMessageSend(m.ChannelID, "-# 현재 요청을 취소했습니다.")
-		} else if h.cancelActiveLogin(s) {
-			// A stuck login isn't a router request, but !cancel is what
-			// users reach for — don't make them guess !login-cancel.
+			msg := "-# 현재 요청을 취소했습니다."
+			if dropped > 0 {
+				msg += fmt.Sprintf(" 대기 중이던 %d개도 취소했습니다.", dropped)
+			}
+			s.ChannelMessageSend(m.ChannelID, msg)
+		} else if dropped > 0 {
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("-# 대기 중이던 요청 %d개를 취소했습니다.", dropped))
 		} else {
 			s.ChannelMessageSend(m.ChannelID, "-# 처리 중인 요청이 없습니다.")
 		}
 		return true
 
-	case content == "!status":
-		sess := h.router.GetSessions().GetOrCreate(m.ChannelID)
-		// Host, PID and version identify which process answered. Every
-		// instance on the token replies, so two answers here means two
-		// bots are live — the thing that makes commands run twice and
-		// /login hand out two competing OAuth URLs. A machine-local lock
-		// cannot catch a duplicate on another host, so surface it instead.
-		host, err := os.Hostname()
-		if err != nil {
-			host = "unknown"
-		}
-		msg := fmt.Sprintf("**Status** — `%s` pid %d, v%s\n- Active Provider: %s\n- Messages: %d",
-			host, os.Getpid(), update.Current(), sess.GetActiveProvider(), sess.MessageCount())
-		sent, err := s.ChannelMessageSend(m.ChannelID, msg)
-		// Read the channel back: a second reply to this same command is a
-		// duplicate instance, which no machine-local check can see.
-		if err == nil && sent != nil {
-			go h.checkForTwin(s, m.ChannelID, sent.ID, "**Status**")
-		}
-		return true
-
-	case content == "!provider":
-		var sb strings.Builder
-		sb.WriteString("**Provider Priority**\n")
-		sess := h.router.GetSessions().GetOrCreate(m.ChannelID)
-		active := sess.GetActiveProvider()
-		for i, p := range h.router.GetProviders() {
-			marker := ""
-			if p.Name() == active {
-				marker = " ← active"
-			}
-			sb.WriteString(fmt.Sprintf("%d. %s (%s)%s\n", i+1, p.Name(), p.Model(), marker))
-		}
-		s.ChannelMessageSend(m.ChannelID, sb.String())
-		return true
-
-	case content == "!debug":
-		sess := h.router.GetSessions().GetOrCreate(m.ChannelID)
-		debug := h.router.GetDebug(m.ChannelID)
-
-		var sb strings.Builder
-		sb.WriteString("**Debug Info**\n")
-		sb.WriteString(fmt.Sprintf("- Channel: `%s`\n", m.ChannelID))
-		sb.WriteString(fmt.Sprintf("- Active Provider: `%s`\n", sess.GetActiveProvider()))
-		sb.WriteString(fmt.Sprintf("- Session Messages: %d\n", sess.MessageCount()))
-		sb.WriteString(fmt.Sprintf("- CLI Session ID: `%s`\n", sess.GetCLISessionID()))
-		sb.WriteString("\n**Providers**\n")
-		for i, p := range h.router.GetProviders() {
-			sb.WriteString(fmt.Sprintf("%d. %s (`%s`)\n", i+1, p.Name(), p.Model()))
-		}
-
-		if debug != nil {
-			if !debug.LastRequestAt.IsZero() {
-				sb.WriteString(fmt.Sprintf("\n**Last Request**\n"))
-				sb.WriteString(fmt.Sprintf("- Time: %s\n", debug.LastRequestAt.Format("2006-01-02 15:04:05")))
-				sb.WriteString(fmt.Sprintf("- Message: `%s`\n", debug.LastRequestMsg))
-				if !debug.LastCompleteAt.IsZero() {
-					elapsed := debug.LastCompleteAt.Sub(debug.LastRequestAt).Truncate(time.Second)
-					sb.WriteString(fmt.Sprintf("- Completed: %s (%s, %d tokens)\n", debug.LastCompleteAt.Format("15:04:05"), elapsed, debug.LastTokens))
-				} else {
-					elapsed := time.Since(debug.LastRequestAt).Truncate(time.Second)
-					sb.WriteString(fmt.Sprintf("- Status: **처리 중** (%s 경과)\n", elapsed))
-				}
-			}
-			if debug.LastError != "" {
-				sb.WriteString(fmt.Sprintf("\n**Last Error**\n"))
-				sb.WriteString(fmt.Sprintf("- Provider: `%s`\n", debug.LastProvider))
-				sb.WriteString(fmt.Sprintf("- Time: %s\n", debug.LastErrorAt.Format("2006-01-02 15:04:05")))
-				sb.WriteString(fmt.Sprintf("- Error:\n```\n%s\n```\n", debug.LastError))
-			}
-		} else {
-			sb.WriteString("\n*No activity recorded for this channel.*\n")
-		}
-
-		s.ChannelMessageSend(m.ChannelID, sb.String())
+	case content == "!status" || content == "!debug":
+		h.sendStatus(s, m.ChannelID)
 		return true
 
 	case content == "!model":
-		var sb strings.Builder
-		sb.WriteString("**Models**\n")
-		for _, p := range h.router.GetProviders() {
-			sb.WriteString(fmt.Sprintf("- %s: `%s`\n", p.Name(), p.Model()))
-		}
-		s.ChannelMessageSend(m.ChannelID, sb.String())
+		h.sendModelPicker(s, m.ChannelID)
 		return true
 
 	case strings.HasPrefix(content, "!model "):
@@ -777,64 +711,22 @@ func (h *Handler) OnReactionAdd(s *discordgo.Session, r *discordgo.MessageReacti
 	}
 	info := val.(*retryInfo)
 
-	// Delete the error message
-	s.ChannelMessageDelete(r.ChannelID, r.MessageID)
+	// Take the 🔄 back so the failed message stops looking clickable; it
+	// stays in the channel as the anchor the retry reacts on.
+	s.MessageReactionRemove(r.ChannelID, r.MessageID, "🔄", s.State.User.ID)
 
-	// Build attachments
-	attachments := h.downloadAttachments(info.attachments)
-
-	// React to indicate processing
-	s.ChannelTyping(r.ChannelID)
-
-	// Status callback
-	var statusMsgID string
-	onStatus := func(status string) {
-		// Retry path sends the full response at the end — skip
-		// per-turn result streaming.
-		if strings.HasPrefix(status, "TURN_RESULT:") {
-			return
-		}
-		if statusMsgID == "" {
-			msg, err := s.ChannelMessageSend(r.ChannelID, fmt.Sprintf("-# %s", status))
-			if err == nil {
-				statusMsgID = msg.ID
-			}
-		} else {
-			s.ChannelMessageEdit(r.ChannelID, statusMsgID, fmt.Sprintf("-# %s", status))
-		}
-	}
-
-	// Retry the request
-	result := h.router.HandleWithAttachments(context.Background(), info.channelID, info.content, attachments, onStatus)
-
-	if statusMsgID != "" {
-		s.ChannelMessageDelete(r.ChannelID, statusMsgID)
-	}
-
-	if result.Error {
-		errMsg, _ := s.ChannelMessageSend(r.ChannelID, h.msgs.AllProvidersFailed)
-		if errMsg != nil {
-			s.MessageReactionAdd(r.ChannelID, errMsg.ID, "🔄")
-			h.retryMessages.Store(errMsg.ID, info)
-		}
-		return
-	}
-
-	if result.ImageData != nil {
-		s.ChannelMessageSendComplex(r.ChannelID, &discordgo.MessageSend{
-			Files: []*discordgo.File{{Name: "screenshot.png", Reader: bytes.NewReader(result.ImageData)}},
-		})
-	}
-	if result.Text != "" {
-		h.sendLongMessage(s, r.ChannelID, result.Text)
-	}
-	if result.TotalTokens > 0 {
-		footer := fmt.Sprintf("-# %s | %d tokens", result.Provider, result.TotalTokens)
-		if result.ToolsUsed > 0 {
-			footer += fmt.Sprintf(" | %d tools", result.ToolsUsed)
-		}
-		s.ChannelMessageSend(r.ChannelID, footer)
-	}
+	// Run the retry the same way a message runs — same queue, same cancel
+	// support, same reporting. Calling the router directly here would let a
+	// retry run beside a normal request, with both resuming one CLI session.
+	// Steering is not offered: a retry replaces a failed request, it is not
+	// a follow-up to whatever is running now.
+	h.dispatch(s, &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID:          r.MessageID,
+		ChannelID:   r.ChannelID,
+		Content:     info.content,
+		Author:      &discordgo.User{ID: r.UserID},
+		Attachments: info.attachments,
+	}}, false)
 }
 
 var slashCommands = []*discordgo.ApplicationCommand{
@@ -843,24 +735,8 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "cancel", Description: "Cancel the current request"},
 	{Name: "restart", Description: "Restart bot (includes update check)"},
 	{Name: "update", Description: "Update pigeon-claw to the latest release and restart"},
-	{Name: "status", Description: "Show active provider and message count"},
-	{Name: "debug", Description: "Show last error, session ID, debug info"},
-	{Name: "model", Description: "List or change provider models"},
-	{Name: "provider", Description: "Show provider priority order"},
-	{Name: "login", Description: "Re-authenticate claude CLI (sends OAuth URL here)"},
-	{
-		Name:        "code",
-		Description: "Submit the OAuth code from the login URL",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
-				Name:        "code",
-				Description: "Authorization code from the browser",
-				Required:    true,
-			},
-		},
-	},
-	{Name: "login-cancel", Description: "Cancel an in-progress login"},
+	{Name: "status", Description: "Show providers, models, queue and last error"},
+	{Name: "model", Description: "Pick a model from a dropdown"},
 	{
 		Name:        "recording",
 		Description: "Start OBS recording",
@@ -908,7 +784,7 @@ func (h *Handler) RegisterSlashCommands(s *discordgo.Session) {
 }
 
 func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
+	if i.Type != discordgo.InteractionApplicationCommand && i.Type != discordgo.InteractionMessageComponent {
 		return
 	}
 
@@ -921,10 +797,23 @@ func (h *Handler) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 
 	// Slash commands were exempt from the channel filter that messages go
 	// through, so an instance configured for other channels still answered
-	// them here — the bot appeared to reply twice to /status and /login
-	// while replying once to ordinary messages. Check before acknowledging,
+	// them here — the bot appeared to reply twice to /status while
+	// replying once to ordinary messages. Check before acknowledging,
 	// so a foreign instance stays out of it entirely.
 	if _, _, serves := h.channelPolicy(i.ChannelID); !serves {
+		return
+	}
+
+	// Picking from the model menu answers the interaction itself — it must
+	// not go through the deferred-ephemeral path below, which would leave
+	// the click unacknowledged.
+	if i.Type == discordgo.InteractionMessageComponent {
+		if !h.handleModelSelect(s, i) {
+			// An unanswered interaction shows the user a red "This
+			// interaction failed", so answer even when we don't know it.
+			slog.Warn("unhandled component interaction", "custom_id", i.MessageComponentData().CustomID)
+			h.respondToComponent(s, i, "알 수 없는 동작입니다.")
+		}
 		return
 	}
 

@@ -12,22 +12,20 @@ import (
 
 type OpenAI struct {
 	apiKey string
-	model  string
+	modelSetting
 	client *http.Client
 }
 
 func NewOpenAI(apiKey, model string) *OpenAI {
 	return &OpenAI{
-		apiKey: apiKey,
-		model:  model,
-		client: &http.Client{},
+		apiKey:       apiKey,
+		modelSetting: newModelSetting(model),
+		client:       &http.Client{},
 	}
 }
 
-func (o *OpenAI) Name() string          { return "openai" }
-func (o *OpenAI) Model() string         { return o.model }
-func (o *OpenAI) SetModel(model string) { o.model = model }
-func (o *OpenAI) SupportsImages() bool  { return true }
+func (o *OpenAI) Name() string         { return "openai" }
+func (o *OpenAI) SupportsImages() bool { return true }
 func (o *OpenAI) SendWithStatus(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, _ StatusCallback) (*Response, error) {
 	return o.Send(ctx, systemPrompt, messages, tools)
 }
@@ -36,7 +34,7 @@ func (o *OpenAI) Send(ctx context.Context, systemPrompt string, messages []Messa
 	apiMessages := o.convertMessages(systemPrompt, messages)
 
 	reqBody := map[string]any{
-		"model":    o.model,
+		"model":    o.Model(),
 		"messages": apiMessages,
 	}
 

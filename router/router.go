@@ -17,6 +17,10 @@ import (
 	"github.com/tackish/pigeon-claw/tools"
 )
 
+// ToolUse re-exports the provider's per-tool call count so callers of the
+// router don't have to import the provider package for it.
+type ToolUse = provider.ToolUse
+
 type HandleResult struct {
 	Text        string
 	ImageData   []byte
@@ -24,8 +28,14 @@ type HandleResult struct {
 	TotalTokens int
 	Provider    string
 	ToolsUsed   int
-	IsFallback  bool
-	Error       bool
+	// ToolsRun names the tools the provider ran, so the reply can say what
+	// the request actually did rather than only that it finished.
+	ToolsRun []ToolUse
+	// Model that answered — reported by the provider when it knows, else
+	// the provider's configured model.
+	Model      string
+	IsFallback bool
+	Error      bool
 }
 
 // DebugInfo holds diagnostic info for the !debug command.
@@ -203,7 +213,9 @@ func (r *Router) tryProvider(
 			if resp.Content != "" {
 				sess.Append(provider.Message{Role: provider.RoleAssistant, Content: resp.Content})
 			}
-			slog.Info("request complete", "provider", p.Name(), "total_tokens", totalTokens, "tools_used", toolsUsed)
+			model := modelUsed(resp, p)
+			slog.Info("request complete", "provider", p.Name(), "model", model,
+				"total_tokens", totalTokens, "tools_used", toolsUsed)
 			return &HandleResult{
 				Text:        resp.Content,
 				ImageData:   lastImageData,
@@ -211,6 +223,7 @@ func (r *Router) tryProvider(
 				TotalTokens: totalTokens,
 				Provider:    p.Name(),
 				ToolsUsed:   toolsUsed,
+				Model:       model,
 			}, nil
 		}
 
@@ -445,11 +458,31 @@ func (r *Router) trySessionAwareProvider(
 		sess.Append(provider.Message{Role: provider.RoleAssistant, Content: resp.Content})
 	}
 
-	slog.Info("request complete", "provider", p.Name(), "total_tokens", resp.Usage.TotalTokens)
+	toolsUsed := 0
+	for _, t := range resp.ToolsRun {
+		toolsUsed += t.Count
+	}
+
+	model := modelUsed(resp, p)
+	slog.Info("request complete", "provider", p.Name(), "model", model,
+		"total_tokens", resp.Usage.TotalTokens, "tools_used", toolsUsed)
 
 	return &HandleResult{
 		Text:        resp.Content,
 		TotalTokens: resp.Usage.TotalTokens,
 		Provider:    p.Name(),
+		ToolsUsed:   toolsUsed,
+		ToolsRun:    resp.ToolsRun,
+		Model:       model,
 	}, nil
+}
+
+// modelUsed prefers what the provider reports over what it was configured
+// with — with nothing pinned, the configured value is empty and only the
+// response knows which model ran.
+func modelUsed(resp *provider.Response, p provider.Provider) string {
+	if resp != nil && resp.Model != "" {
+		return resp.Model
+	}
+	return p.Model()
 }

@@ -14,19 +14,18 @@ import (
 )
 
 type ClaudeCLI struct {
-	model    string
+	modelSetting
 	fallback string
 
 	steerMu  sync.Mutex
 	steering map[string]*steerSession // sessionID → live run accepting stdin input
 }
 
+// NewClaudeCLI builds the provider. An empty model means "whatever the CLI
+// is configured to run" — no --model flag is passed, so the choice follows
+// the user's Claude Code settings instead of being pinned here.
 func NewClaudeCLI(model, fallback string) *ClaudeCLI {
-	if model == "" {
-		// Detect default model from claude CLI
-		model = detectClaudeModel()
-	}
-	return &ClaudeCLI{model: model, fallback: fallback, steering: make(map[string]*steerSession)}
+	return &ClaudeCLI{modelSetting: newModelSetting(model), fallback: fallback, steering: make(map[string]*steerSession)}
 }
 
 // steerSession tracks a live CLI run started with --input-format
@@ -120,32 +119,22 @@ func (c *ClaudeCLI) Steer(sessionID, message string) bool {
 	return ss.steer(message)
 }
 
-func detectClaudeModel() string {
-	claudeBin := findClaudeBin()
-	cmd := exec.Command(claudeBin, "-p", "hi", "--output-format", "json", "--max-turns", "1", "--dangerously-skip-permissions")
-	out, err := cmd.Output()
-	if err == nil {
-		var resp struct {
-			ModelUsage map[string]json.RawMessage `json:"modelUsage"`
-		}
-		if json.Unmarshal(out, &resp) == nil && len(resp.ModelUsage) > 0 {
-			for key := range resp.ModelUsage {
-				// key is like "claude-opus-4-6[1m]" — strip the context window suffix
-				model := key
-				if idx := strings.Index(model, "["); idx != -1 {
-					model = model[:idx]
-				}
-				return model
-			}
-		}
+// modelArgs returns the model flags for a run. Both are omitted when unset:
+// passing no --model is what lets the CLI run its own configured model, and
+// pinning a fallback here would override that choice on the retry too.
+func (c *ClaudeCLI) modelArgs() []string {
+	var args []string
+	if model := c.Model(); model != "" {
+		args = append(args, "--model", model)
 	}
-	return "sonnet"
+	if c.fallback != "" {
+		args = append(args, "--fallback-model", c.fallback)
+	}
+	return args
 }
 
-func (c *ClaudeCLI) Name() string          { return "claude-cli" }
-func (c *ClaudeCLI) Model() string         { return c.model }
-func (c *ClaudeCLI) SetModel(model string) { c.model = model }
-func (c *ClaudeCLI) SupportsImages() bool  { return true }
+func (c *ClaudeCLI) Name() string         { return "claude-cli" }
+func (c *ClaudeCLI) SupportsImages() bool { return true }
 
 func (c *ClaudeCLI) Send(ctx context.Context, systemPrompt string, messages []Message, tools []Tool) (*Response, error) {
 	return c.SendWithStatus(ctx, systemPrompt, messages, tools, nil)
@@ -201,15 +190,12 @@ func (c *ClaudeCLI) SendWithSession(ctx context.Context, systemPrompt string, me
 	// into the run while it works (see Steer).
 	args := []string{
 		"-p",
-		"--model", c.model,
 		"--dangerously-skip-permissions",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 	}
-	if c.fallback != "" {
-		args = append(args, "--fallback-model", c.fallback)
-	}
+	args = append(args, c.modelArgs()...)
 
 	if resume {
 		// Resume existing session: --resume <session-id>
@@ -258,14 +244,11 @@ func (c *ClaudeCLI) SendWithStatus(ctx context.Context, systemPrompt string, mes
 
 	args := []string{
 		"-p", prompt,
-		"--model", c.model,
 		"--dangerously-skip-permissions",
 		"--output-format", "stream-json",
 		"--verbose",
 	}
-	if c.fallback != "" {
-		args = append(args, "--fallback-model", c.fallback)
-	}
+	args = append(args, c.modelArgs()...)
 
 	cmd := exec.CommandContext(ctx, claudeBin, args...)
 
@@ -318,6 +301,20 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 	var finalText strings.Builder
 	var totalInput, totalOutput int
 	var errSubtype string // set by a result event that failed without text
+	var runModel string   // model reported by the CLI for this run
+
+	// Tool usage, in first-use order — the caller reports it so the user
+	// can see what the run actually did.
+	var toolsRun []ToolUse
+	toolIdx := map[string]int{}
+	countTool := func(name string) {
+		if i, ok := toolIdx[name]; ok {
+			toolsRun[i].Count++
+			return
+		}
+		toolIdx[name] = len(toolsRun)
+		toolsRun = append(toolsRun, ToolUse{Name: name, Count: 1})
+	}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer
@@ -332,10 +329,11 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			Type    string `json:"type"`
 			Content string `json:"content"`
 			Message struct {
+				Model   string `json:"model"`
 				Content []struct {
-					Type  string `json:"type"`
-					Text  string `json:"text"`
-					Name  string `json:"name"`
+					Type  string          `json:"type"`
+					Text  string          `json:"text"`
+					Name  string          `json:"name"`
 					Input json.RawMessage `json:"input"`
 				} `json:"content"`
 				StopReason *string `json:"stop_reason"`
@@ -359,37 +357,46 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 
 		switch event.Type {
 		case "assistant":
+			// The model that actually answered — which is not necessarily
+			// the configured one, since the CLI picks its own default when
+			// none is pinned and may switch to the fallback mid-run.
+			if event.Message.Model != "" {
+				runModel = event.Message.Model
+			}
+
 			// Parse tool_use from message.content array
-			if onStatus != nil {
-				reported := false
-				for _, block := range event.Message.Content {
-					if block.Type == "tool_use" && block.Name != "" {
-						// Extract short description from input
-						var input map[string]interface{}
-						json.Unmarshal(block.Input, &input)
-						detail := block.Name
-						if cmd, ok := input["command"].(string); ok {
-							if len(cmd) > 60 {
-								cmd = cmd[:60] + "..."
-							}
-							detail += ": " + cmd
-						} else if pattern, ok := input["pattern"].(string); ok {
-							detail += ": " + pattern
-						} else if path, ok := input["file_path"].(string); ok {
-							detail += ": " + path
-						}
-						// Prefix with TOOL_START: so handler knows a tool is running
-						// and can pause idle-timeout checks.
-						onStatus(fmt.Sprintf("TOOL_START:🔧 %s", detail))
-						reported = true
-					} else if block.Type == "text" && block.Text != "" {
-						onStatus("✍ writing...")
-						reported = true
+			reported := false
+			for _, block := range event.Message.Content {
+				if block.Type == "tool_use" && block.Name != "" {
+					countTool(block.Name)
+					if onStatus == nil {
+						continue
 					}
+					// Extract short description from input
+					var input map[string]interface{}
+					json.Unmarshal(block.Input, &input)
+					detail := block.Name
+					if cmd, ok := input["command"].(string); ok {
+						if len(cmd) > 60 {
+							cmd = cmd[:60] + "..."
+						}
+						detail += ": " + cmd
+					} else if pattern, ok := input["pattern"].(string); ok {
+						detail += ": " + pattern
+					} else if path, ok := input["file_path"].(string); ok {
+						detail += ": " + path
+					}
+					// Prefix with TOOL_START: so handler knows a tool is running
+					// and can pause idle-timeout checks.
+					onStatus(fmt.Sprintf("TOOL_START:🔧 %s", detail))
+					reported = true
+				} else if block.Type == "text" && block.Text != "" && onStatus != nil {
+					onStatus("✍ writing...")
+					reported = true
 				}
-				if !reported {
-					onStatus("💭 thinking...")
-				}
+			}
+			if !reported && onStatus != nil {
+				onStatus("💭 thinking...")
 			}
 		case "user":
 			// Tool result returned — signal handler to resume idle checks.
@@ -441,7 +448,7 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 		}
 		text := finalText.String()
 		if text != "" {
-			return &Response{Content: text}, nil
+			return &Response{Content: text, ToolsRun: toolsRun, Model: runModel}, nil
 		}
 		stderr := strings.TrimSpace(stderrBuf.String())
 		if stderr != "" {
@@ -469,12 +476,14 @@ func (c *ClaudeCLI) executeCmd(ctx context.Context, cmd *exec.Cmd, onStatus Stat
 			OutputTokens: totalOutput,
 			TotalTokens:  totalInput + totalOutput,
 		},
+		ToolsRun: toolsRun,
+		Model:    runModel,
 	}, nil
 }
 
 // FindClaudeBin returns the path to the claude CLI binary, checking common
 // install locations before falling back to PATH lookup. Exported so other
-// packages (e.g. the Discord login flow) can locate the same binary.
+// packages can locate the same binary this provider runs.
 func FindClaudeBin() string { return findClaudeBin() }
 
 func findClaudeBin() string {

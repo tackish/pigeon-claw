@@ -12,29 +12,27 @@ import (
 
 type Claude struct {
 	apiKey string
-	model  string
+	modelSetting
 	client *http.Client
 }
 
 func NewClaude(apiKey, model string) *Claude {
 	return &Claude{
-		apiKey: apiKey,
-		model:  model,
-		client: &http.Client{},
+		apiKey:       apiKey,
+		modelSetting: newModelSetting(model),
+		client:       &http.Client{},
 	}
 }
 
-func (c *Claude) Name() string          { return "claude" }
-func (c *Claude) Model() string         { return c.model }
-func (c *Claude) SetModel(model string) { c.model = model }
-func (c *Claude) SupportsImages() bool  { return true }
+func (c *Claude) Name() string         { return "claude" }
+func (c *Claude) SupportsImages() bool { return true }
 func (c *Claude) SendWithStatus(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, _ StatusCallback) (*Response, error) {
 	return c.Send(ctx, systemPrompt, messages, tools)
 }
 
 func (c *Claude) Send(ctx context.Context, systemPrompt string, messages []Message, tools []Tool) (*Response, error) {
 	reqBody := map[string]any{
-		"model":      c.model,
+		"model":      c.Model(),
 		"max_tokens": 4096,
 		"system":     systemPrompt,
 		"messages":   c.convertMessages(messages),

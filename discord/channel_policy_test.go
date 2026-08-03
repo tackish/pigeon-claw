@@ -7,7 +7,7 @@ import "testing"
 // token while being configured for different channels; the gateway hands
 // every event to all of them, so the channel filter is what keeps each in
 // its own channels. Slash commands used to skip it, which is why /status
-// and /login drew two replies while ordinary messages drew one.
+// and /status drew two replies while ordinary messages drew one.
 func TestChannelPolicyFiltersForeignChannel(t *testing.T) {
 	h := NewHandler(nil, []string{"chan-mine"}, nil, "")
 

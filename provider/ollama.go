@@ -10,23 +10,21 @@ import (
 )
 
 type Ollama struct {
-	host   string
-	model  string
+	host string
+	modelSetting
 	client *http.Client
 }
 
 func NewOllama(host, model string) *Ollama {
 	return &Ollama{
-		host:   strings.TrimRight(host, "/"),
-		model:  model,
-		client: &http.Client{},
+		host:         strings.TrimRight(host, "/"),
+		modelSetting: newModelSetting(model),
+		client:       &http.Client{},
 	}
 }
 
-func (o *Ollama) Name() string          { return "ollama" }
-func (o *Ollama) Model() string         { return o.model }
-func (o *Ollama) SetModel(model string) { o.model = model }
-func (o *Ollama) SupportsImages() bool  { return false }
+func (o *Ollama) Name() string         { return "ollama" }
+func (o *Ollama) SupportsImages() bool { return false }
 func (o *Ollama) SendWithStatus(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, _ StatusCallback) (*Response, error) {
 	return o.Send(ctx, systemPrompt, messages, tools)
 }
@@ -35,7 +33,7 @@ func (o *Ollama) Send(ctx context.Context, systemPrompt string, messages []Messa
 	apiMessages := o.convertMessages(systemPrompt, messages)
 
 	reqBody := map[string]any{
-		"model":    o.model,
+		"model":    o.Model(),
 		"messages": apiMessages,
 		"stream":   false,
 	}

@@ -63,8 +63,7 @@ func (h *Handler) checkForTwin(s *discordgo.Session, channelID, ownID, prefix st
 	slog.Warn("duplicate bot instance detected", "channel", channelID, "twin_replies", twins)
 	s.ChannelMessageSend(channelID, fmt.Sprintf(
 		"⚠️ **봇이 %d개 실행 중입니다.** 같은 명령에 %d개가 응답했습니다.\n"+
-			"모든 명령이 중복 실행되고, `/login` 은 서로 다른 OAuth URL을 하나씩 만들어 "+
-			"어느 코드도 맞지 않게 됩니다.\n"+
+			"모든 명령이 중복 실행되고, 같은 요청이 두 번 처리됩니다.\n"+
 			"찾는 법 — 이름이 `pigeon-claw` 가 아닐 수 있습니다:\n"+
 			"```\npgrep -fl 'pigeon[-_]claw|go-build|__debug_bin|dlv'\n```\n"+
 			"`!restart` 를 보내면 양쪽 모두 현재 바이너리로 재실행되어, "+

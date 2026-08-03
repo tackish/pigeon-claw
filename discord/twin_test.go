@@ -62,13 +62,14 @@ func TestCountTwinRepliesIgnoresOldInvocation(t *testing.T) {
 }
 
 func TestCountTwinRepliesCountsMultiple(t *testing.T) {
+	const notice = "**Status** — hostA pid 1, v0.0.49"
 	recent := []*discordgo.Message{
-		msg("mine", selfUser, loginStartNotice, time.Second),
-		msg("t1", selfUser, loginStartNotice, time.Second),
-		msg("t2", selfUser, loginStartNotice, time.Second),
+		msg("mine", selfUser, notice, time.Second),
+		msg("t1", selfUser, notice, time.Second),
+		msg("t2", selfUser, notice, time.Second),
 	}
 
-	if got := countTwinReplies(recent, selfUser, "mine", loginStartNotice, time.Now()); got != 2 {
+	if got := countTwinReplies(recent, selfUser, "mine", notice, time.Now()); got != 2 {
 		t.Fatalf("twin replies = %d, want 2", got)
 	}
 }

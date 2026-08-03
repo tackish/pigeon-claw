@@ -10,9 +10,9 @@ import (
 // Every Discord event carries a unique snowflake ID, so a repeat is always
 // a redelivery, never a second user action — even two identical messages
 // sent back to back get different IDs. Handling one twice is what makes a
-// command run twice: /login starts two `claude setup-token` processes whose
-// OAuth challenges compete, so the code the user pastes can only ever match
-// one of them and the other sits silent.
+// command run twice: a single message starts two CLI runs on the same
+// channel, so one wins the channel slot and the other is turned away as a
+// duplicate request the user never made.
 //
 // Redelivery has several causes — a reconnect that leaves the previous
 // websocket draining, a resumed session replaying its backlog, a handler

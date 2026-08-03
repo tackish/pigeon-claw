@@ -141,7 +141,9 @@ func buildProviders(cfg *config.Config) []provider.Provider {
 			return provider.NewOllama(cfg.OllamaHost, cfg.OllamaModel)
 		},
 		"claude-cli": func() provider.Provider {
-			return provider.NewClaudeCLI(cfg.ClaudeCLIModel, cfg.ClaudeCLIFallback) // empty model → auto-detect from CLI
+			// Defaults to config.DefaultClaudeCLIModel; empty only if the
+			// operator cleared it, which then passes no --model at all.
+			return provider.NewClaudeCLI(cfg.ClaudeCLIModel, cfg.ClaudeCLIFallback)
 		},
 	}
 

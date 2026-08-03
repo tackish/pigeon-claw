@@ -9,6 +9,20 @@ import (
 	"time"
 )
 
+// DefaultClaudeCLIModel is the model the bot runs when CLAUDE_CLI_MODEL is
+// unset.
+//
+// It is a full model ID on purpose. Inheriting the CLI's own setting sounds
+// tidier, but that setting is usually an alias and aliases don't mean what
+// they look like: `opus` resolves to claude-opus-4-8, not the current Opus.
+// The CLI offers no way to enumerate models, so "always the newest" cannot be
+// resolved at runtime — it has to be stated here.
+//
+// Keep this in step with the picker list in discord/model_picker.go; a test
+// there fails if the two drift apart. Overridable per install via
+// CLAUDE_CLI_MODEL, and per channel via the /model picker.
+const DefaultClaudeCLIModel = "claude-opus-5[1m]"
+
 type Config struct {
 	DiscordToken       string
 	AnthropicAPIKey    string
@@ -45,22 +59,20 @@ func Load() (*Config, error) {
 	loadEnvFile(home + "/.pigeon-claw/config")
 
 	cfg := &Config{
-		DiscordToken:    os.Getenv("DISCORD_TOKEN"),
-		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
-		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
-		GeminiAPIKey:    os.Getenv("GEMINI_API_KEY"),
-		OllamaHost:      envOrDefault("OLLAMA_HOST", "http://localhost:11434"),
+		DiscordToken:      os.Getenv("DISCORD_TOKEN"),
+		AnthropicAPIKey:   os.Getenv("ANTHROPIC_API_KEY"),
+		OpenAIAPIKey:      os.Getenv("OPENAI_API_KEY"),
+		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
+		OllamaHost:        envOrDefault("OLLAMA_HOST", "http://localhost:11434"),
 		OllamaModel:       envOrDefault("OLLAMA_MODEL", "llama3"),
-		// Fallback uses the "opus" alias so the CLI always resolves it to
-		// the latest Opus-tier model without a code change per release.
-		ClaudeCLIModel:    envOrDefault("CLAUDE_CLI_MODEL", "claude-fable-5"),
-		ClaudeCLIFallback: envOrDefault("CLAUDE_CLI_FALLBACK_MODEL", "opus"),
-		AnthropicModel:  envOrDefault("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
-		OpenAIModel:     envOrDefault("OPENAI_MODEL", "gpt-4o"),
-		GeminiModel:     envOrDefault("GEMINI_MODEL", "gemini-2.0-flash"),
-		SystemPrompt:     loadSystemPrompt(),
-		LogLevel:         envOrDefault("LOG_LEVEL", "info"),
-		ResponseLanguage: os.Getenv("RESPONSE_LANGUAGE"),
+		ClaudeCLIModel:    envOrDefault("CLAUDE_CLI_MODEL", DefaultClaudeCLIModel),
+		ClaudeCLIFallback: os.Getenv("CLAUDE_CLI_FALLBACK_MODEL"),
+		AnthropicModel:    envOrDefault("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+		OpenAIModel:       envOrDefault("OPENAI_MODEL", "gpt-4o"),
+		GeminiModel:       envOrDefault("GEMINI_MODEL", "gemini-2.0-flash"),
+		SystemPrompt:      loadSystemPrompt(),
+		LogLevel:          envOrDefault("LOG_LEVEL", "info"),
+		ResponseLanguage:  os.Getenv("RESPONSE_LANGUAGE"),
 	}
 
 	if cfg.DiscordToken == "" {

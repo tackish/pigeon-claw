@@ -66,10 +66,24 @@ type TokenUsage struct {
 	TotalTokens  int
 }
 
+// ToolUse counts how often one tool ran during a request. Used to tell the
+// user what work actually happened, not just that something did.
+type ToolUse struct {
+	Name  string
+	Count int
+}
+
 type Response struct {
 	Content   string
 	ToolCalls []ToolCall
 	Usage     TokenUsage
+	// Tools the provider ran itself, in first-use order. Providers that
+	// execute tools on our side (see Executor) leave this empty.
+	ToolsRun []ToolUse
+	// Model that actually produced this response, when the provider
+	// reports one. It can differ from the configured model: nothing is
+	// pinned by default, and a run may fall back mid-flight.
+	Model string
 }
 
 // StatusCallback is called during processing to report intermediate status

@@ -12,22 +12,20 @@ import (
 
 type Gemini struct {
 	apiKey string
-	model  string
+	modelSetting
 	client *http.Client
 }
 
 func NewGemini(apiKey, model string) *Gemini {
 	return &Gemini{
-		apiKey: apiKey,
-		model:  model,
-		client: &http.Client{},
+		apiKey:       apiKey,
+		modelSetting: newModelSetting(model),
+		client:       &http.Client{},
 	}
 }
 
-func (g *Gemini) Name() string          { return "gemini" }
-func (g *Gemini) Model() string         { return g.model }
-func (g *Gemini) SetModel(model string) { g.model = model }
-func (g *Gemini) SupportsImages() bool  { return true }
+func (g *Gemini) Name() string         { return "gemini" }
+func (g *Gemini) SupportsImages() bool { return true }
 func (g *Gemini) SendWithStatus(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, _ StatusCallback) (*Response, error) {
 	return g.Send(ctx, systemPrompt, messages, tools)
 }
@@ -53,7 +51,7 @@ func (g *Gemini) Send(ctx context.Context, systemPrompt string, messages []Messa
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", g.model, g.apiKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", g.Model(), g.apiKey)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(data)))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

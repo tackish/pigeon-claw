@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -172,4 +173,61 @@ func TestSteerSessionWriteUserMessageFormat(t *testing.T) {
 			t.Fatalf("message %q missing %s", line, want)
 		}
 	}
+}
+
+func TestModelArgsOmittedWhenUnset(t *testing.T) {
+	// Nothing pinned: the CLI must be left to run its own configured model.
+	if args := (&ClaudeCLI{}).modelArgs(); len(args) != 0 {
+		t.Fatalf("no model configured should pass no flags, got %v", args)
+	}
+
+	args := (&ClaudeCLI{modelSetting: newModelSetting("opus"), fallback: "sonnet"}).modelArgs()
+	want := []string{"--model", "opus", "--fallback-model", "sonnet"}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Fatalf("modelArgs = %v, want %v", args, want)
+	}
+
+	// A fallback alone must not smuggle a model choice back in.
+	args = (&ClaudeCLI{fallback: "sonnet"}).modelArgs()
+	if strings.Join(args, " ") != "--fallback-model sonnet" {
+		t.Fatalf("fallback-only args = %v", args)
+	}
+}
+
+func TestExecuteCmdReportsModelThatAnswered(t *testing.T) {
+	c := NewClaudeCLI("", "")
+	cmd := streamJSONCmd(
+		`{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"result","subtype":"success","result":"hi"}`,
+	)
+
+	resp, err := c.executeCmd(context.Background(), cmd, nil, nil)
+	if err != nil {
+		t.Fatalf("executeCmd: %v", err)
+	}
+	if resp.Model != "claude-opus-4-8" {
+		t.Fatalf("Model = %q, want the model from the stream", resp.Model)
+	}
+}
+
+// The /model picker changes the model from the Discord event goroutine while
+// a request may be building its argv on another. Run with -race.
+func TestSetModelIsSafeDuringRun(t *testing.T) {
+	c := NewClaudeCLI("claude-opus-5", "")
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			c.SetModel("claude-sonnet-5")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			_ = c.modelArgs()
+			_ = c.Model()
+		}
+	}()
+	wg.Wait()
 }
